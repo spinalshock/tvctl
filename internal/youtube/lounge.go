@@ -63,11 +63,25 @@ func Play(ctx context.Context, launch Launcher, videoID string, startSeconds int
 	if err != nil {
 		return fmt.Errorf("YouTube did not register the TV: %w", err)
 	}
-	s, err := bind(ctx, tok)
-	if err != nil {
-		return err
+	// The lounge endpoints occasionally answer a fresh session with an
+	// HTML error page; one retry after a short pause clears it.
+	var last error
+	for attempt := 0; attempt < 2; attempt++ {
+		s, err := bind(ctx, tok)
+		if err == nil {
+			err = s.setPlaylist(ctx, videoID, startSeconds)
+		}
+		if err == nil {
+			return nil
+		}
+		last = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1500 * time.Millisecond):
+		}
 	}
-	return s.setPlaylist(ctx, videoID, startSeconds)
+	return last
 }
 
 // screenToken exchanges the pairing code for the screen's lounge token.
@@ -179,7 +193,10 @@ func postRaw(ctx context.Context, u string, form url.Values) (string, error) {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode/100 != 2 {
-		return "", fmt.Errorf("HTTP %d: %.200s", resp.StatusCode, b)
+		if strings.Contains(strings.ToLower(string(b[:min(len(b), 200)])), "<html") {
+			return "", fmt.Errorf("YouTube API returned HTTP %d", resp.StatusCode)
+		}
+		return "", fmt.Errorf("YouTube API HTTP %d: %.200s", resp.StatusCode, b)
 	}
 	return string(b), nil
 }

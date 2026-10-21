@@ -40,7 +40,7 @@ class TvctlAccessibilityService : AccessibilityService() {
         val pkg = e.packageName?.toString()
         when (e.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
-                if (pkg != null && pkg != packageName && !pkg.startsWith("com.android.systemui") && pkg != lastForeground) {
+                if (pkg != null && !pkg.startsWith("com.android.systemui") && pkg != lastForeground) {
                     lastForeground = pkg
                     App.instance.events.publish(JSONObject().put("type", "foreground").put("package", pkg).toString())
                     nowPlaying()?.foreground = pkg

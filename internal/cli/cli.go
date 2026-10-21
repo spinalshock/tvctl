@@ -26,6 +26,7 @@ import (
 	"github.com/omAthalye/tvctl/internal/config"
 	"github.com/omAthalye/tvctl/internal/device"
 	"github.com/omAthalye/tvctl/internal/firetv"
+	"github.com/omAthalye/tvctl/internal/receiver"
 )
 
 // Env is what a command needs from its host: where to print, how to ask the
@@ -56,6 +57,7 @@ func Root(env *Env) *cobra.Command {
 	root.AddCommand(
 		e.discover(), e.pair(), e.key(), e.vol(), e.apps(), e.app(),
 		e.text(), e.url(), e.say(), e.sleep(), e.wake(), e.status(), e.devices(),
+		e.setup(), e.now(), e.events(), e.play(), e.toast(), e.shot(),
 	)
 	return root
 }
@@ -460,6 +462,25 @@ func (e *cmds) url() *cobra.Command {
 			_, d, _, err := e.open()
 			if err != nil {
 				return err
+			}
+			// YouTube goes through the lounge protocol, which needs no app
+			// on the TV. Everything else is best handled by Android's own
+			// URL routing via the companion app (Netflix titles deep-link,
+			// web pages open in Silk); fall back to the stock route if the
+			// app isn't set up.
+			id, _, st, _ := e.open()
+			ent := st.Devices[id]
+			if ent.ReceiverToken != "" && !strings.Contains(strings.ToLower(args[0]), "youtu") {
+				rc := receiver.New(ent.Host, ent.ReceiverToken)
+				needs, err := rc.Open(cx, args[0], "")
+				if err == nil {
+					err = e.bringForward(cx, d, needs)
+				}
+				if err != nil {
+					return err
+				}
+				e.emit("ok (via receiver)", map[string]any{"ok": true, "url": args[0], "via": "receiver"})
+				return nil
 			}
 			o, err := need[device.URLOpener](d, "opening URLs")
 			if err != nil {

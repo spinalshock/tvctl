@@ -20,6 +20,8 @@ type Entry struct {
 	Host  string `json:"host"`
 	MAC   string `json:"mac,omitempty"`
 	Token string `json:"token,omitempty"`
+	// ReceiverToken is the companion app's pairing token (tv setup).
+	ReceiverToken string `json:"receiver_token,omitempty"`
 }
 
 // Store is the on-disk document. Default names the entry used when the user

@@ -33,6 +33,7 @@ import (
 	"github.com/omAthalye/tvctl/internal/config"
 	"github.com/omAthalye/tvctl/internal/device"
 	"github.com/omAthalye/tvctl/internal/firetv"
+	"github.com/omAthalye/tvctl/internal/receiver"
 )
 
 var debugLog io.Writer
@@ -79,6 +80,15 @@ type model struct {
 	devHost string
 	verbs   []string
 	apps    []device.App // cached once at start, refreshed by `apps`
+
+	// Companion-app state. events is fed by a goroutine holding the
+	// receiver's WebSocket open; nil when the app isn't set up.
+	rc       *receiver.Client
+	rcState  string // "not set up", "offline", "online"
+	now      *receiver.Now
+	nowAt    time.Time // when `now` was received, for extrapolation
+	keyboard string    // package asking for text, "" when none
+	events   chan receiver.Event
 }
 
 // Messages from background work.
@@ -90,7 +100,12 @@ type (
 		took time.Duration
 	}
 	appsMsg []device.App
+	// eventMsg is one receiver event; rcStateMsg a connection change.
+	eventMsg receiver.Event
+	tickMsg  time.Time
 )
+
+func tick() tea.Cmd { return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) }) }
 
 func newModel() (*model, error) {
 	st, err := config.Load()
@@ -112,13 +127,54 @@ func newModel() (*model, error) {
 		devName: ent.Name,
 		devHost: ent.Host,
 		verbs:   cli.Verbs(),
+		rcState: "not set up",
+		events:  make(chan receiver.Event, 32),
+	}
+	if ent.ReceiverToken != "" {
+		m.rc = receiver.New(ent.Host, ent.ReceiverToken)
+		m.rcState = "offline"
 	}
 	m.say(styleDim.Render("tvctl · type help for commands, keys for remote mode, quit to exit"))
 	return m, nil
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, loadApps())
+	cmds := []tea.Cmd{textinput.Blink, loadApps()}
+	if m.rc != nil {
+		cmds = append(cmds, m.connectEvents(), m.waitEvent(), tick())
+	}
+	return tea.Batch(cmds...)
+}
+
+// connectEvents holds the receiver socket open for the TUI's lifetime,
+// reconnecting with backoff. Events land on m.events; waitEvent turns
+// them into Bubble Tea messages one at a time, which is the idiomatic way
+// to bridge a long-lived goroutine into the update loop.
+func (m *model) connectEvents() tea.Cmd {
+	rc, ch := m.rc, m.events
+	return func() tea.Msg {
+		go func() {
+			delay := time.Second
+			for {
+				err := rc.Events(context.Background(), func(ev receiver.Event) error {
+					ch <- ev
+					return nil
+				})
+				_ = err
+				ch <- receiver.Event{Type: "_offline"}
+				time.Sleep(delay)
+				if delay < 15*time.Second {
+					delay *= 2
+				}
+			}
+		}()
+		return nil
+	}
+}
+
+func (m *model) waitEvent() tea.Cmd {
+	ch := m.events
+	return func() tea.Msg { return eventMsg(<-ch) }
 }
 
 // loadApps fetches the app list once so completion can offer app names
@@ -156,6 +212,34 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case appsMsg:
 		m.apps = msg
 		return m, nil
+
+	case tickMsg:
+		return m, tick()
+
+	case eventMsg:
+		switch msg.Type {
+		case "_offline":
+			m.rcState = "offline"
+		case "now":
+			m.rcState = "online"
+			m.now = msg.Now
+			m.nowAt = time.Now()
+		case "foreground":
+			m.rcState = "online"
+		case "keyboard":
+			m.rcState = "online"
+			if msg.Open != nil && *msg.Open {
+				pkg := ""
+				if msg.Package != nil {
+					pkg = *msg.Package
+				}
+				m.keyboard = pkg
+				m.say(styleDim.Render("⌨ TV wants text (" + pkg + "): type  text <your words>"))
+			} else {
+				m.keyboard = ""
+			}
+		}
+		return m, m.waitEvent()
 
 	case resultMsg:
 		m.running = ""
@@ -480,7 +564,8 @@ func (m *model) View() string {
 		return ""
 	}
 	header := styleHeader.Width(m.width).Render(
-		fmt.Sprintf("%s  %s  ·  receiver: not installed", m.devName, m.devHost))
+		fmt.Sprintf("%s  %s  ·  receiver: %s", m.devName, m.devHost, m.rcState))
+	nowLine := styleDim.Render("  now: " + m.describeNow())
 
 	var sug strings.Builder
 	for i, s := range m.suggests {
@@ -506,11 +591,34 @@ func (m *model) View() string {
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		header,
+		nowLine,
 		m.view.View(),
 		strings.TrimRight(sug.String(), "\n"),
 		m.input.View(),
 		statusBar,
 	)
+}
+
+// describeNow renders the now line, extrapolating the position from the
+// last snapshot so the clock ticks between events.
+func (m *model) describeNow() string {
+	if m.rc == nil {
+		return "run tv setup for now-playing, screenshots and local files"
+	}
+	if m.now == nil {
+		return "–"
+	}
+	n := *m.now
+	if n.State == "playing" && n.Speed > 0 && n.UpdatedMs > 0 {
+		// updated_ms is the TV's uptime clock for system sessions and wall
+		// time for our player; either way the delta since we received the
+		// snapshot is what matters, so we track receipt time instead.
+		n.PositionMs += int64(time.Since(m.nowAt).Seconds() * 1000 * n.Speed)
+		if n.DurationMs > 0 && n.PositionMs > n.DurationMs {
+			n.PositionMs = n.DurationMs
+		}
+	}
+	return n.Describe()
 }
 
 // highlight bolds the matched characters of a suggestion.
@@ -535,7 +643,7 @@ func (m *model) layout() {
 	if sugLines == 0 {
 		sugLines = 1 // JoinVertical renders the empty block as one line
 	}
-	h := m.height - 1 - sugLines - 1 - 1
+	h := m.height - 1 - 1 - sugLines - 1 - 1 // header, now line, suggestions, prompt, status
 	if h < 3 {
 		h = 3
 	}
