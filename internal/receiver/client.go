@@ -183,6 +183,13 @@ func (c *Client) Toast(ctx context.Context, text string, long bool) error {
 	return c.do(ctx, http.MethodPost, "/toast", map[string]any{"text": text, "long": long}, nil)
 }
 
+// Control drives the active media session of whatever app is playing:
+// play, pause, toggle, stop, next, previous, seek (absolute ms), seek_by
+// (relative ms, negative to rewind).
+func (c *Client) Control(ctx context.Context, action string, positionMs int64) error {
+	return c.do(ctx, http.MethodPost, "/control", map[string]any{"action": action, "position_ms": positionMs}, nil)
+}
+
 // Screenshot returns PNG bytes.
 func (c *Client) Screenshot(ctx context.Context) ([]byte, error) {
 	var png []byte

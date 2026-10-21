@@ -60,6 +60,7 @@ func Root(env *Env) *cobra.Command {
 		e.text(), e.url(), e.say(), e.sleep(), e.wake(), e.status(), e.devices(),
 		e.setup(), e.now(), e.events(), e.play(), e.toast(), e.shot(), e.initCmd(),
 		e.yt(), e.netflixSearch(), e.search(),
+		e.pause(), e.resume(), e.toggle(), e.stop(), e.next(), e.prev(), e.seek(),
 	)
 	return root
 }

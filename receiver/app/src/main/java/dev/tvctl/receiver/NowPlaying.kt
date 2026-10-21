@@ -104,6 +104,33 @@ class NowPlaying(private val ctx: Context, private val events: Events) {
         return pick
     }
 
+    /**
+     * Transport control on the session that matters. Deterministic, unlike
+     * the remote's play/pause key which only toggles. Returns false when
+     * there is no session to control.
+     */
+    fun control(action: String, positionMs: Long): Boolean {
+        val c = best() ?: return false
+        val t = c.transportControls
+        when (action) {
+            "play" -> t.play()
+            "pause" -> t.pause()
+            "toggle" -> if (c.playbackState?.state == PlaybackState.STATE_PLAYING) t.pause() else t.play()
+            "stop" -> t.stop()
+            "next" -> t.skipToNext()
+            "previous" -> t.skipToPrevious()
+            "seek" -> t.seekTo(positionMs)
+            "seek_by" -> {
+                val ps = c.playbackState
+                val now = (ps?.position ?: 0L) + if (ps?.state == PlaybackState.STATE_PLAYING)
+                    ((android.os.SystemClock.elapsedRealtime() - (ps.lastPositionUpdateTime)) * ps.playbackSpeed).toLong() else 0L
+                t.seekTo((now + positionMs).coerceAtLeast(0))
+            }
+            else -> return false
+        }
+        return true
+    }
+
     fun snapshot(): JSONObject {
         val o = JSONObject().put("foreground", foreground ?: JSONObject.NULL)
         val c = best()

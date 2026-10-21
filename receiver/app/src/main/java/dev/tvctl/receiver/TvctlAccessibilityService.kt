@@ -40,7 +40,8 @@ class TvctlAccessibilityService : AccessibilityService() {
         val pkg = e.packageName?.toString()
         when (e.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
-                if (pkg != null && !pkg.startsWith("com.android.systemui") && pkg != lastForeground) {
+                // Overlays (Alexa's vizzini, system UI) are not the foreground app.
+                if (pkg != null && !pkg.startsWith("com.android.systemui") && pkg != "com.amazon.vizzini" && pkg != lastForeground) {
                     lastForeground = pkg
                     App.instance.events.publish(JSONObject().put("type", "foreground").put("package", pkg).toString())
                     nowPlaying()?.foreground = pkg

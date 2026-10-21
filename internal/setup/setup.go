@@ -129,17 +129,23 @@ func Run(ctx context.Context, e config.Entry, o Options) (string, error) {
 		say("  %-42s ok", "foreground/keyboard events, screenshots")
 	}
 
-	// 5. Start it. Launching once registers the boot receiver.
-	if _, err := conn.Shell(ctx, "am start -n "+pkg+"/.MainActivity"); err != nil {
-		say("  launch via adb failed (%v), trying the TV's API", err)
-		if o.Launch != nil {
-			_ = o.Launch(ctx, pkg)
-		}
-	}
+	// 5. Start it. The service alone is enough and doesn't interrupt what's
+	// on screen (an update shouldn't pause a movie). Starting it explicitly
+	// also clears Android's "stopped" state so the boot broadcast arrives.
+	_, _ = conn.Shell(ctx, "am start-foreground-service -n "+pkg+"/.ReceiverService")
 	rc := receiver.New(e.Host, "")
 	say("Waiting for the receiver to come up …")
 	for i := 0; i < 20 && !rc.Reachable(); i++ {
 		time.Sleep(500 * time.Millisecond)
+	}
+	if !rc.Reachable() {
+		// Fall back to the visible launch, then the TV's own API.
+		if _, err := conn.Shell(ctx, "am start -n "+pkg+"/.MainActivity"); err != nil && o.Launch != nil {
+			_ = o.Launch(ctx, pkg)
+		}
+		for i := 0; i < 20 && !rc.Reachable(); i++ {
+			time.Sleep(500 * time.Millisecond)
+		}
 	}
 	if !rc.Reachable() {
 		return "", fmt.Errorf("receiver did not start on :%d", receiver.Port)

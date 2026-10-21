@@ -46,6 +46,11 @@ class PlayerActivity : AppCompatActivity() {
         session = MediaSession.Builder(this, player).build()
         player.addListener(object : Player.Listener {
             override fun onEvents(p: Player, events: Player.Events) = report()
+            // A dead source (the serving machine went away) should not leave
+            // an errored session sitting in the now-playing list.
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                finish()
+            }
         })
         load(intent)
     }

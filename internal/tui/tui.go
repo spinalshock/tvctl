@@ -513,9 +513,17 @@ func (m *model) resolve(line string) (argv []string, local func() tea.Cmd) {
 	case "files":
 		return nil, func() tea.Cmd { return m.chooseFiles() }
 	case "next":
-		return nil, func() tea.Cmd { m.playlistNext(); return nil }
+		if m.pl != nil {
+			return nil, func() tea.Cmd { m.playlistNext(); return nil }
+		}
 	case "stop":
-		return nil, func() tea.Cmd { m.playlistStop("stopped"); return nil }
+		if m.pl != nil {
+			return nil, func() tea.Cmd { m.playlistStop("stopped"); return nil }
+		}
+	case "play":
+		if len(fields) == 1 {
+			return []string{"resume"}, nil
+		}
 	case "shot":
 		return nil, func() tea.Cmd { return m.screenshot() }
 	case "view":
@@ -545,7 +553,7 @@ func (m *model) resolve(line string) (argv []string, local func() tea.Cmd) {
 func (m *model) isCommand(line string) bool {
 	head := strings.ToLower(strings.Fields(line)[0])
 	switch head {
-	case "quit", "exit", "clear", "keys", "help", "files", "next", "stop", "shot", "view", "text":
+	case "quit", "exit", "clear", "keys", "help", "files", "next", "stop", "shot", "view", "text", "play":
 		return true
 	}
 	for _, v := range m.verbs {
@@ -575,7 +583,8 @@ func (m *model) help(args []string) {
 		m.say("  <url>             open it (YouTube links play directly)")
 		m.say("  keys              remote mode: arrow keys go to the TV until esc")
 		m.say("  files             pick files or a folder in yazi, play them on the TV in order")
-		m.say("  next · stop       skip to the next file · end the playlist")
+		m.say("  pause · resume · toggle · stop · next · prev · seek +30   media controls for any app")
+		m.say("  next · stop       with a playlist running: skip to the next file · end the playlist")
 		m.say("  shot · view       screenshot the TV · open the last one in yazi")
 		m.say("  help <command>    details for one command")
 		m.say("  clear · quit      ctrl+l also clears, ctrl+c quits")

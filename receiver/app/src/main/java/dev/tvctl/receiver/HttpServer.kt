@@ -32,6 +32,7 @@ import java.io.IOException
  *   POST /intent            {"action","data","package","component"}
  *   POST /play              {"url","title"} native player
  *   POST /toast             {"text"}
+ *   POST /control           {"action": play|pause|toggle|stop|next|previous|seek|seek_by, "position_ms"}
  *   GET  /shot              PNG screenshot (needs accessibility, API 30+)
  */
 class HttpServer(private val ctx: Context, port: Int, private val now: NowPlaying) : NanoWSD(port) {
@@ -67,6 +68,7 @@ class HttpServer(private val ctx: Context, port: Int, private val now: NowPlayin
             s.method == Method.POST && path == "/intent" -> intent(body(s))
             s.method == Method.POST && path == "/play" -> play(body(s))
             s.method == Method.POST && path == "/toast" -> toast(body(s))
+            s.method == Method.POST && path == "/control" -> control(body(s))
             s.method == Method.GET && path == "/shot" -> shot()
             else -> json(Response.Status.NOT_FOUND, JSONObject().put("error", "no such route"))
         }
@@ -221,6 +223,13 @@ class HttpServer(private val ctx: Context, port: Int, private val now: NowPlayin
         val long = b.optBoolean("long", false)
         main.post { Toast.makeText(ctx, text, if (long) Toast.LENGTH_LONG else Toast.LENGTH_SHORT).show() }
         return ok(JSONObject().put("ok", true))
+    }
+
+    private fun control(b: JSONObject): Response {
+        val action = b.optString("action")
+        val ok = now.control(action, b.optLong("position_ms", 0))
+        if (!ok) return json(Response.Status.NOT_FOUND, JSONObject().put("error", "nothing is playing to control (or unknown action \"$action\")"))
+        return ok(JSONObject().put("ok", true).put("action", action))
     }
 
     private fun shot(): Response {
