@@ -90,7 +90,8 @@ type model struct {
 	rcState  string // "not set up", "offline", "online"
 	now      *receiver.Now
 	nowAt    time.Time // when `now` was received, for extrapolation
-	keyboard string    // package asking for text, "" when none
+	ticks    int
+	keyboard string // package asking for text, "" when none
 	events   chan receiver.Event
 
 	dev      device.Device  // stock-API driver, for keyboard polling and typing
@@ -113,6 +114,8 @@ type (
 	// eventMsg is one receiver event; rcStateMsg a connection change.
 	eventMsg receiver.Event
 	tickMsg  time.Time
+	// resyncMsg is a periodic GET /now, a safety net for missed events.
+	resyncMsg struct{ now *receiver.Now }
 	// kbMsg is the result of one keyboard-state poll.
 	kbMsg struct {
 		open bool
@@ -214,6 +217,19 @@ func (m *model) connectEvents() tea.Cmd {
 	}
 }
 
+func (m *model) resyncNow() tea.Cmd {
+	rc := m.rc
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		n, err := rc.Now(ctx)
+		if err != nil {
+			return resyncMsg{}
+		}
+		return resyncMsg{now: n}
+	}
+}
+
 func (m *model) waitEvent() tea.Cmd {
 	ch := m.events
 	return func() tea.Msg { return eventMsg(<-ch) }
@@ -256,7 +272,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		m.ticks++
+		if m.rc != nil && m.ticks%10 == 0 {
+			return m, tea.Batch(tick(), m.resyncNow())
+		}
 		return m, tick()
+
+	case resyncMsg:
+		if msg.now != nil {
+			m.rcState = "online"
+			m.now = msg.now
+			m.nowAt = time.Now()
+		}
+		return m, nil
 
 	case kbMsg:
 		if msg.open && !m.typing {
@@ -290,6 +318,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case "_offline":
 			m.rcState = "offline"
+			m.now = nil // never show frozen data from a dead connection
 		case "now":
 			m.rcState = "online"
 			m.now = msg.Now
