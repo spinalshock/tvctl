@@ -991,7 +991,14 @@ func (m *model) renderNow(w int) string {
 	}
 	left := "  " + symStyle.Render(sym) + " " + styleAccent.Render(shortApp(n.App)) + "   "
 	avail := w - lipgloss.Width(left) - 2
-	line1 := left + styleTitle.Render(ansi.Truncate(title, max(0, avail), "…"))
+	var line1 string
+	if strings.TrimSpace(title) == "" {
+		// Some apps (Netflix) publish no metadata at all; say so instead of
+		// leaving a gap that looks like a bug.
+		line1 = left + styleDim.Render("no title published by this app")
+	} else {
+		line1 = left + styleTitle.Render(ansi.Truncate(title, max(0, avail), "…"))
+	}
 
 	clock := fmtClock(pos)
 	if n.DurationMs > 0 {
@@ -1001,11 +1008,15 @@ func (m *model) renderNow(w int) string {
 	if barW < 10 {
 		barW = 10
 	}
-	filled := 0
+	var bar string
 	if n.DurationMs > 0 {
-		filled = min(barW, int(float64(barW)*float64(pos)/float64(n.DurationMs)))
+		filled := min(barW, int(float64(barW)*float64(pos)/float64(n.DurationMs)))
+		bar = styleBarOn.Render(strings.Repeat("━", filled)) + styleBarOff.Render(strings.Repeat("─", barW-filled))
+	} else {
+		// Unknown length: a dashed line reads as "no end known", not "0%".
+		bar = styleBarOff.Render(strings.Repeat("╌", barW))
+		clock += "  elapsed"
 	}
-	bar := styleBarOn.Render(strings.Repeat("━", filled)) + styleBarOff.Render(strings.Repeat("─", barW-filled))
 	return line1 + "\n" + "  " + bar + "  " + styleDim.Render(clock)
 }
 
