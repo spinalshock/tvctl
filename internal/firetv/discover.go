@@ -1,0 +1,146 @@
+package firetv
+
+import (
+	"bufio"
+	"context"
+	"net"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/grandcat/zeroconf"
+)
+
+// Found is a discovered Fire TV before pairing.
+type Found struct {
+	Host string
+	Name string
+}
+
+// Discover finds Fire TVs on the LAN by listening to two things every Fire
+// TV announces without any pairing:
+//
+//   - mDNS `_amzn-wplay._tcp`: Amazon's Whisperplay device manager. Its
+//     instance name is an opaque id, so it tells us *where*, not *who*.
+//   - mDNS `_airplay._tcp`: Fire TV Edition TVs with AirPlay advertise their
+//     human name here ("Living Room Fire TV"). Macs advertise it too, so we
+//     only use it to name hosts the first query already found.
+//   - SSDP M-SEARCH for the DIAL service type, for networks where mDNS is
+//     filtered but multicast UDP isn't.
+//
+// Every candidate is then confirmed by asking DIAL on :8009 about the
+// FireTVRemote app, which only a Fire TV answers. timeout bounds the whole
+// thing; two seconds finds everything on a normal home LAN.
+func Discover(ctx context.Context, timeout time.Duration) ([]Found, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var (
+		mu    sync.Mutex
+		hosts = map[string]string{} // ip -> name ("" until known)
+	)
+	add := func(ip, name string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if _, ok := hosts[ip]; !ok {
+			hosts[ip] = ""
+		}
+		if name != "" {
+			hosts[ip] = name
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() { defer wg.Done(); browse(ctx, "_amzn-wplay._tcp", func(ip, _ string) { add(ip, "") }) }()
+	go func() {
+		defer wg.Done()
+		// AirPlay names arrive for Macs too; remember them all, and only
+		// attach the ones whose IP a Fire TV query also produced.
+		names := map[string]string{}
+		browse(ctx, "_airplay._tcp", func(ip, name string) { names[ip] = name })
+		<-ctx.Done()
+		mu.Lock()
+		for ip, n := range names {
+			if _, ok := hosts[ip]; ok {
+				hosts[ip] = n
+			}
+		}
+		mu.Unlock()
+	}()
+	go func() { defer wg.Done(); ssdp(ctx, func(ip string) { add(ip, "") }) }()
+	wg.Wait()
+
+	// Confirm each candidate is actually a Fire TV. Short per-host budget
+	// so one dead IP can't stall the list.
+	var out []Found
+	for ip, name := range hosts {
+		pctx, pcancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		_, err := dialState(pctx, ip, "FireTVRemote")
+		pcancel()
+		if err != nil {
+			continue
+		}
+		if name == "" {
+			name = "Fire TV"
+		}
+		out = append(out, Found{Host: ip, Name: name})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Host < out[j].Host })
+	return out, nil
+}
+
+// browse runs one mDNS query and reports every IPv4 it resolves. zeroconf
+// delivers entries on a channel until ctx ends.
+func browse(ctx context.Context, service string, hit func(ip, name string)) {
+	r, err := zeroconf.NewResolver(nil)
+	if err != nil {
+		return
+	}
+	entries := make(chan *zeroconf.ServiceEntry, 16)
+	go func() {
+		for e := range entries {
+			for _, ip := range e.AddrIPv4 {
+				hit(ip.String(), e.Instance)
+			}
+		}
+	}()
+	_ = r.Browse(ctx, service, "local.", entries)
+	<-ctx.Done()
+}
+
+// ssdp sends one multicast M-SEARCH for DIAL and collects responders until
+// ctx ends. We only need the source IP of each reply; the LOCATION header
+// would give a description URL but DIAL on Fire TV doesn't serve it anyway.
+func ssdp(ctx context.Context, hit func(ip string)) {
+	conn, err := net.ListenPacket("udp4", ":0")
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	dst := &net.UDPAddr{IP: net.IPv4(239, 255, 255, 250), Port: 1900}
+	msg := "M-SEARCH * HTTP/1.1\r\n" +
+		"HOST: 239.255.255.250:1900\r\n" +
+		"MAN: \"ssdp:discover\"\r\n" +
+		"MX: 1\r\n" +
+		"ST: urn:dial-multiscreen-org:service:dial:1\r\n\r\n"
+	for i := 0; i < 2; i++ { // UDP; send twice for luck
+		_, _ = conn.WriteTo([]byte(msg), dst)
+	}
+	buf := make([]byte, 2048)
+	for {
+		dl, _ := ctx.Deadline()
+		_ = conn.SetReadDeadline(dl)
+		n, from, err := conn.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		sc := bufio.NewScanner(strings.NewReader(string(buf[:n])))
+		if sc.Scan() && strings.HasPrefix(sc.Text(), "HTTP/1.1 200") {
+			if ua, ok := from.(*net.UDPAddr); ok {
+				hit(ua.IP.String())
+			}
+		}
+	}
+}
