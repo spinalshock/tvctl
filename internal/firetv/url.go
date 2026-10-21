@@ -5,16 +5,20 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+
+	"github.com/omAthalye/tvctl/internal/youtube"
 )
 
 // OpenURL routes a web link to the matching TV app. Without ADB the only
 // apps that accept a payload are the ones registered with DIAL:
 //
-//   - YouTube: POST /apps/YouTube "v=<id>&t=<secs>". The TV's YouTube DIAL
-//     endpoint answers 403 unless the request carries an Origin header of
-//     https://www.youtube.com, which is what Google's own senders send.
-//   - Netflix: POST /apps/Netflix "v=<titleId>".
+//   - YouTube: a plain DIAL launch only opens the app; the video is queued
+//     through YouTube's lounge protocol (see internal/youtube).
+//   - Netflix: POST /apps/Netflix opens the app but ignores any payload, so
+//     a Netflix link currently just launches Netflix; the real deep link
+//     needs the companion app.
 //
 // Silk also registers with DIAL but a launch only starts its process in the
 // background and never shows a page, so there is no generic-URL path on the
@@ -31,16 +35,16 @@ func (c *Client) OpenURL(ctx context.Context, raw string) error {
 	host = strings.TrimPrefix(host, "m.")
 
 	if id, t := youtubeID(host, u); id != "" {
-		body := "v=" + id
-		if t != "" {
-			body += "&t=" + t
+		start, _ := strconv.Atoi(t)
+		launch := func(ctx context.Context, app, body string, hdr map[string]string) error {
+			return dialLaunchWith(ctx, c.Host, app, body, hdr)
 		}
-		return dialLaunchWith(ctx, c.Host, "YouTube", body, map[string]string{"Origin": "https://www.youtube.com"})
+		return youtube.Play(ctx, launch, id, start)
 	}
 	if id := netflixID(host, u); id != "" {
 		return dialLaunch(ctx, c.Host, "Netflix", "v="+id)
 	}
-	return fmt.Errorf("no TV app takes %s links without the companion app (YouTube and Netflix links work)", host)
+	return fmt.Errorf("no TV app takes %s links without the companion app (YouTube links play; Netflix links open the app)", host)
 }
 
 // youtubeID extracts the video id (and optional start seconds) from the
