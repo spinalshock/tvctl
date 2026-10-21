@@ -59,7 +59,7 @@ func Root(env *Env) *cobra.Command {
 		e.discover(), e.pair(), e.key(), e.vol(), e.apps(), e.app(),
 		e.text(), e.url(), e.say(), e.sleep(), e.wake(), e.status(), e.devices(),
 		e.setup(), e.now(), e.events(), e.play(), e.toast(), e.shot(), e.initCmd(),
-		e.yt(), e.netflixSearch(),
+		e.yt(), e.netflixSearch(), e.search(),
 	)
 	return root
 }
@@ -456,6 +456,12 @@ func (e *cmds) text() *cobra.Command {
 				return err
 			}
 			s := strings.Join(args, " ")
+			if kw, ok := d.(device.KeyboardWatcher); ok {
+				if open, _, err := kw.KeyboardOpen(cx); err == nil && !open {
+					return errors.New("the TV's system keyboard isn't open, so there's nothing to type into. " +
+						"Netflix and YouTube draw their own keyboards: use `search netflix <words>`, `search youtube <words>`, or `say ...`")
+				}
+			}
 			if err := d.Text(cx, s); err != nil {
 				return err
 			}

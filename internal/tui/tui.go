@@ -570,6 +570,8 @@ func (m *model) help(args []string) {
 		m.say("")
 		m.say("  " + styleBold.Render("Prompt shortcuts"))
 		m.say("  <app name>        launch it (netflix, yt, or any prefix of an installed app)")
+		m.say("  youtube <words>   play the top YouTube result · netflix <words> searches Netflix")
+		m.say("  search <words>    Fire TV's search across apps (search youtube|netflix <words> for one app)")
 		m.say("  <url>             open it (YouTube links play directly)")
 		m.say("  keys              remote mode: arrow keys go to the TV until esc")
 		m.say("  files             pick files or a folder in yazi, play them on the TV in order")
