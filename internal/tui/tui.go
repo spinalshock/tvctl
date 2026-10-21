@@ -1,0 +1,561 @@
+// Package tui is a text-first front end: a prompt with fuzzy completion, a
+// scrollback of commands and their output, and a status bar. It executes
+// the cobra command tree from internal/cli in-process, so every verb the
+// CLI has works here with the same output, and nothing is defined twice.
+//
+// Layout, top to bottom:
+//
+//	header     device name, host, receiver state
+//	scrollback what you ran and what came back (scrolls)
+//	suggests   up to six completion candidates while typing
+//	prompt     "> " + input
+//	status     mode hints, or a running indicator
+package tui
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/omAthalye/tvctl/internal/cli"
+	"github.com/omAthalye/tvctl/internal/config"
+	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/omAthalye/tvctl/internal/firetv"
+)
+
+var debugLog io.Writer
+
+// Run starts the program and blocks until the user quits.
+func Run() error {
+	if p := os.Getenv("TVCTL_DEBUG"); p != "" {
+		f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err == nil {
+			debugLog = f
+		}
+	}
+	m, err := newModel()
+	if err != nil {
+		return err
+	}
+	_, err = tea.NewProgram(m, tea.WithAltScreen()).Run()
+	return err
+}
+
+// ---- model ----------------------------------------------------------------
+
+type mode int
+
+const (
+	modePrompt mode = iota // typing commands
+	modeKeys               // arrow keys go straight to the TV
+)
+
+type model struct {
+	input    textinput.Model
+	view     viewport.Model
+	lines    []string // scrollback, already styled
+	history  []string
+	histPos  int
+	suggests []match
+	sugSel   int
+	mode     mode
+	running  string // command currently executing, "" when idle
+	width    int
+	height   int
+
+	devName string
+	devHost string
+	verbs   []string
+	apps    []device.App // cached once at start, refreshed by `apps`
+}
+
+// Messages from background work.
+type (
+	resultMsg struct {
+		cmd  string
+		out  string
+		err  error
+		took time.Duration
+	}
+	appsMsg []device.App
+)
+
+func newModel() (*model, error) {
+	st, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	_, ent, err := st.Resolve("")
+	if err != nil {
+		return nil, err
+	}
+	in := textinput.New()
+	in.Prompt = "> "
+	in.Placeholder = "netflix · youtube.com/watch?v=… · vol up 3 · say switch to hdmi 1 · help"
+	in.Focus()
+	in.CharLimit = 512
+	m := &model{
+		input:   in,
+		view:    viewport.New(80, 20),
+		devName: ent.Name,
+		devHost: ent.Host,
+		verbs:   cli.Verbs(),
+	}
+	m.say(styleDim.Render("tvctl · type help for commands, keys for remote mode, quit to exit"))
+	return m, nil
+}
+
+func (m *model) Init() tea.Cmd {
+	return tea.Batch(textinput.Blink, loadApps())
+}
+
+// loadApps fetches the app list once so completion can offer app names
+// without a round-trip per keystroke.
+func loadApps() tea.Cmd {
+	return func() tea.Msg {
+		st, err := config.Load()
+		if err != nil {
+			return appsMsg(nil)
+		}
+		_, ent, err := st.Resolve("")
+		if err != nil {
+			return appsMsg(nil)
+		}
+		c := firetv.New(ent.Host, ent.Name, ent.Token)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		apps, err := c.Apps(ctx)
+		if err != nil {
+			return appsMsg(nil)
+		}
+		return appsMsg(apps)
+	}
+}
+
+// ---- update ---------------------------------------------------------------
+
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		m.layout()
+		return m, nil
+
+	case appsMsg:
+		m.apps = msg
+		return m, nil
+
+	case resultMsg:
+		m.running = ""
+		m.say(stylePrompt.Render("> ") + msg.cmd)
+		out := strings.TrimRight(msg.out, "\n")
+		if msg.err != nil && out == "" {
+			out = "tv: " + msg.err.Error()
+		}
+		for _, l := range strings.Split(out, "\n") {
+			if msg.err != nil {
+				m.say("  " + styleErr.Render(l))
+			} else {
+				m.say("  " + l)
+			}
+		}
+		m.say(styleDim.Render(fmt.Sprintf("  %.1fs", msg.took.Seconds())))
+		return m, nil
+
+	case tea.KeyMsg:
+		if m.mode == modeKeys {
+			return m.updateKeys(msg)
+		}
+		return m.updatePrompt(msg)
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+// updatePrompt handles typing. Tab cycles suggestions, Enter runs, Up/Down
+// walk history when no suggestion is selected.
+// Special keys are matched on msg.Type, never msg.String(): Bubble Tea
+// batches runes that arrive together into one message whose String() is the
+// concatenation, so a fast "up" would otherwise look like the up arrow.
+func (m *model) updatePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyCtrlL:
+		m.lines = nil
+		m.refresh()
+		return m, nil
+	case tea.KeyTab:
+		if len(m.suggests) > 0 {
+			m.accept(m.suggests[m.sugSel].text)
+			m.sugSel = 0
+			m.complete()
+		}
+		return m, nil
+	case tea.KeyShiftTab:
+		if len(m.suggests) > 0 {
+			m.sugSel = (m.sugSel + 1) % len(m.suggests)
+		}
+		return m, nil
+	case tea.KeyUp:
+		if m.histPos > 0 {
+			m.histPos--
+			m.input.SetValue(m.history[m.histPos])
+			m.input.CursorEnd()
+		}
+		return m, nil
+	case tea.KeyDown:
+		if m.histPos < len(m.history)-1 {
+			m.histPos++
+			m.input.SetValue(m.history[m.histPos])
+			m.input.CursorEnd()
+		} else {
+			m.histPos = len(m.history)
+			m.input.SetValue("")
+		}
+		return m, nil
+	case tea.KeyEnter:
+		line := strings.TrimSpace(m.input.Value())
+		m.input.SetValue("")
+		m.suggests = nil
+		m.layout()
+		if line == "" {
+			return m, nil
+		}
+		m.history = append(m.history, line)
+		m.histPos = len(m.history)
+		return m, m.dispatch(line)
+	case tea.KeyEsc:
+		m.input.SetValue("")
+		m.suggests = nil
+		return m, nil
+	}
+	var cmd tea.Cmd
+	if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 && !msg.Paste {
+		// Runes that arrived in one read (fast typing, some pastes) come as
+		// one message. The text input matches its own bindings by string,
+		// so a batch spelling "up" or "down" would hit the suggestion
+		// bindings and vanish. Feed them one rune at a time instead.
+		for _, r := range msg.Runes {
+			m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		}
+	} else {
+		m.input, cmd = m.input.Update(msg)
+	}
+	if debugLog != nil {
+		fmt.Fprintf(debugLog, "key=%q type=%d paste=%v value=%q\n", msg.String(), msg.Type, msg.Paste, m.input.Value())
+	}
+	m.complete()
+	m.layout()
+	return m, cmd
+}
+
+// Keys mode mappings. Special keys by type; printable ones by rune. Space
+// is play/pause because that's the universal media convention.
+var (
+	keyByType = map[tea.KeyType]device.Key{
+		tea.KeyUp: device.KeyUp, tea.KeyDown: device.KeyDown, tea.KeyLeft: device.KeyLeft, tea.KeyRight: device.KeyRight,
+		tea.KeyEnter: device.KeySelect, tea.KeyBackspace: device.KeyBack, tea.KeySpace: device.KeyPlayPause,
+	}
+	keyByRune = map[rune]device.Key{
+		'h': device.KeyHome, 'm': device.KeyMenu, ' ': device.KeyPlayPause,
+		'+': device.KeyVolumeUp, '-': device.KeyVolumeDown, '0': device.KeyMute,
+		'>': device.KeyFastFwd, '<': device.KeyRewind,
+	}
+)
+
+func (m *model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.Type == tea.KeyEsc || msg.Type == tea.KeyCtrlC || (msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == 'q') {
+		m.mode = modePrompt
+		m.say(styleDim.Render("keys mode off"))
+		return m, nil
+	}
+	k, ok := keyByType[msg.Type]
+	if !ok && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
+		k, ok = keyByRune[msg.Runes[0]]
+	}
+	if ok {
+		// Fire and forget: a remote should feel instant, so we don't wait
+		// for the result before accepting the next key, and we don't log
+		// each press into the scrollback.
+		return m, func() tea.Msg {
+			env := &cli.Env{Out: &bytes.Buffer{}, Ask: noAsk}
+			_ = cli.Run([]string{"key", string(k)}, env)
+			return nil
+		}
+	}
+	return m, nil
+}
+
+// dispatch turns a prompt line into argv and runs it in the background.
+func (m *model) dispatch(line string) tea.Cmd {
+	argv, local := m.resolve(line)
+	if local != nil {
+		return local()
+	}
+	m.running = line
+	return func() tea.Msg {
+		var buf bytes.Buffer
+		t0 := time.Now()
+		err := cli.Run(argv, &cli.Env{Out: &buf, Ask: noAsk})
+		return resultMsg{cmd: line, out: buf.String(), err: err, took: time.Since(t0)}
+	}
+}
+
+// noAsk is the TUI's answer to a command that wants to prompt (pairing):
+// not here. Pairing is a one-time terminal job.
+func noAsk(prompt string) (string, error) {
+	return "", errors.New(prompt + ": run this one as `tv pair` in a terminal")
+}
+
+var urlish = regexp.MustCompile(`^(https?://|www\.|[a-z0-9-]+(\.[a-z0-9-]+)+(/|$))`)
+
+// resolve implements the agreed precedence: built-in word, verb, URL, app.
+// local non-nil means the line is handled in-process (help, keys, quit) and
+// returns the tea.Cmd to run, if any.
+func (m *model) resolve(line string) (argv []string, local func() tea.Cmd) {
+	fields := strings.Fields(line)
+	head := strings.ToLower(fields[0])
+	switch head {
+	case "quit", "exit":
+		return nil, func() tea.Cmd { return tea.Quit }
+	case "clear":
+		return nil, func() tea.Cmd { m.lines = nil; m.refresh(); return nil }
+	case "keys":
+		return nil, func() tea.Cmd {
+			m.mode = modeKeys
+			m.say(styleDim.Render("keys mode: arrows · enter=select · backspace=back · h=home · m=menu · space=play · +/-/0 volume · esc to leave"))
+			return nil
+		}
+	case "help":
+		return nil, func() tea.Cmd { m.help(fields[1:]); return nil }
+	}
+	for _, v := range m.verbs {
+		if head == v {
+			return fields, nil
+		}
+	}
+	if urlish.MatchString(strings.ToLower(fields[0])) {
+		return []string{"url", fields[0]}, nil
+	}
+	// Anything else is an app name; ResolveApp handles aliases and
+	// prefixes and produces the "did you mean" error.
+	return []string{"app", line}, nil
+}
+
+// help renders cobra's own help for the root or one verb into the
+// scrollback, plus the TUI-only words.
+func (m *model) help(args []string) {
+	var buf bytes.Buffer
+	root := cli.Root(&cli.Env{Out: &buf, Ask: noAsk})
+	root.SetArgs(append([]string{"help"}, args...))
+	_ = root.Execute()
+	for _, l := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		m.say("  " + l)
+	}
+	if len(args) == 0 {
+		m.say("")
+		m.say("  " + styleBold.Render("Prompt shortcuts"))
+		m.say("  <app name>        launch it (netflix, yt, or any prefix of an installed app)")
+		m.say("  <url>             open it (YouTube links play directly)")
+		m.say("  keys              remote mode: arrow keys go to the TV until esc")
+		m.say("  help <command>    details for one command")
+		m.say("  clear · quit      ctrl+l also clears, ctrl+c quits")
+	}
+}
+
+// ---- completion -----------------------------------------------------------
+
+// complete recomputes suggestions for the current input. The first word
+// completes over verbs, app names and shortcuts; later words complete over
+// the verb's own choices (vol up|down|mute, key names, app names).
+func (m *model) complete() {
+	val := m.input.Value()
+	if strings.TrimSpace(val) == "" {
+		m.suggests = nil
+		return
+	}
+	fields := strings.Fields(val)
+	typingFirst := len(fields) == 1 && !strings.HasSuffix(val, " ")
+	var cands []string
+	switch {
+	case typingFirst:
+		cands = append(cands, m.verbs...)
+		cands = append(cands, "help", "keys", "clear", "quit")
+		for a := range cli.Aliases {
+			cands = append(cands, a)
+		}
+		for _, a := range m.apps {
+			cands = append(cands, a.Name)
+		}
+	default:
+		switch strings.ToLower(fields[0]) {
+		case "vol":
+			cands = []string{"up", "down", "mute"}
+		case "key":
+			for _, k := range device.AllKeys {
+				cands = append(cands, string(k))
+			}
+		case "app":
+			for a := range cli.Aliases {
+				cands = append(cands, a)
+			}
+			for _, a := range m.apps {
+				cands = append(cands, a.Name)
+			}
+		case "help":
+			cands = m.verbs
+		}
+	}
+	sort.Strings(cands)
+	cands = dedupe(cands)
+	last := ""
+	if !strings.HasSuffix(val, " ") {
+		last = fields[len(fields)-1]
+	}
+	m.suggests = fuzzyRank(last, cands, 6)
+	if m.sugSel >= len(m.suggests) {
+		m.sugSel = 0
+	}
+}
+
+// accept replaces the word being typed with the chosen suggestion.
+func (m *model) accept(s string) {
+	val := m.input.Value()
+	if strings.HasSuffix(val, " ") {
+		m.input.SetValue(val + s + " ")
+	} else {
+		fields := strings.Fields(val)
+		fields[len(fields)-1] = s
+		m.input.SetValue(strings.Join(fields, " ") + " ")
+	}
+	m.input.CursorEnd()
+}
+
+// dedupe drops case-insensitive duplicates ("Netflix" the app vs "netflix"
+// the alias), keeping the first, which after sorting is the capitalised
+// app name.
+func dedupe(in []string) []string {
+	seen := map[string]bool{}
+	out := in[:0]
+	for _, s := range in {
+		k := strings.ToLower(s)
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// ---- view -----------------------------------------------------------------
+
+var (
+	styleHeader = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("24")).Padding(0, 1)
+	styleStatus = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Background(lipgloss.Color("236")).Padding(0, 1)
+	styleDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	styleErr    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	styleBold   = lipgloss.NewStyle().Bold(true)
+	stylePrompt = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
+	styleSug    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	styleSugSel = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("238"))
+	styleHit    = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
+)
+
+func (m *model) View() string {
+	if m.width == 0 {
+		return ""
+	}
+	header := styleHeader.Width(m.width).Render(
+		fmt.Sprintf("%s  %s  ·  receiver: not installed", m.devName, m.devHost))
+
+	var sug strings.Builder
+	for i, s := range m.suggests {
+		line := "  " + highlight(s)
+		if i == m.sugSel {
+			line = styleSugSel.Render(line)
+		} else {
+			line = styleSug.Render(line)
+		}
+		sug.WriteString(line + "\n")
+	}
+
+	var status string
+	switch {
+	case m.running != "":
+		status = "running: " + m.running
+	case m.mode == modeKeys:
+		status = "KEYS  arrows · enter · backspace · h m space + - 0 < >  ·  esc to leave"
+	default:
+		status = "tab complete · ↑↓ history · help · keys · quit"
+	}
+	statusBar := styleStatus.Width(m.width).Render(status)
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		header,
+		m.view.View(),
+		strings.TrimRight(sug.String(), "\n"),
+		m.input.View(),
+		statusBar,
+	)
+}
+
+// highlight bolds the matched characters of a suggestion.
+func highlight(s match) string {
+	var b strings.Builder
+	pi := 0
+	for i, r := range s.text {
+		if pi < len(s.pos) && s.pos[pi] == i {
+			b.WriteString(styleHit.Render(string(r)))
+			pi++
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// layout sizes the viewport so header, suggestions, prompt and status
+// always fit; the scrollback takes whatever is left.
+func (m *model) layout() {
+	sugLines := len(m.suggests)
+	if sugLines == 0 {
+		sugLines = 1 // JoinVertical renders the empty block as one line
+	}
+	h := m.height - 1 - sugLines - 1 - 1
+	if h < 3 {
+		h = 3
+	}
+	m.view.Width = m.width
+	m.view.Height = h
+	m.input.Width = m.width - 4
+	m.refresh()
+}
+
+// say appends one line to the scrollback and keeps the view pinned to the
+// bottom, like a terminal.
+func (m *model) say(line string) {
+	m.lines = append(m.lines, line)
+	if len(m.lines) > 2000 {
+		m.lines = m.lines[len(m.lines)-2000:]
+	}
+	m.refresh()
+}
+
+func (m *model) refresh() {
+	m.view.SetContent(strings.Join(m.lines, "\n"))
+	m.view.GotoBottom()
+}
