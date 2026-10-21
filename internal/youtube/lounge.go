@@ -46,10 +46,11 @@ func Play(ctx context.Context, launch Launcher, videoID string, startSeconds int
 	if err := launch(ctx, "YouTube", "pairingCode="+code+"&theme=cl", map[string]string{"Origin": dialOrigin}); err != nil {
 		return fmt.Errorf("launch YouTube: %w", err)
 	}
-	// The TV registers the code asynchronously; poll briefly.
+	// The TV registers the code asynchronously, and slowly when the app is
+	// already busy playing; poll for up to ~15 s.
 	var tok string
 	var err error
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 20; i++ {
 		tok, err = screenToken(ctx, code)
 		if err == nil {
 			break
