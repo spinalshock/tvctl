@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/omAthalye/tvctl/internal/cast"
 	"github.com/omAthalye/tvctl/internal/config"
 	"github.com/omAthalye/tvctl/internal/device"
 	"github.com/omAthalye/tvctl/internal/receiver"
@@ -150,12 +149,13 @@ func deref(s *string) string {
 func (e *cmds) play() *cobra.Command {
 	var title string
 	c := &cobra.Command{
-		Use:   "play <file|url>",
-		Short: "Play a local video file or a direct media URL in the TV's native player",
-		Long: `A local file is served to the TV from this machine over HTTP for as long
-as the command runs (Ctrl-C stops serving; the TV keeps whatever it has
-buffered). A URL is handed to the TV directly and the command returns.`,
-		Args: cobra.ExactArgs(1),
+		Use:   "play <file|dir|url>...",
+		Short: "Play local files (or a direct media URL) in the TV's native player",
+		Long: `Local files are served to the TV from this machine for as long as the
+command runs; several files, or a directory, play in order. Ctrl-C stops
+serving (the TV keeps what it has buffered). A URL is handed to the TV
+directly and the command returns.`,
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cx, cancel := ctx()
 			defer cancel()
@@ -163,101 +163,76 @@ buffered). A URL is handed to the TV directly and the command returns.`,
 			if err != nil {
 				return err
 			}
-			src := args[0]
-			if strings.Contains(src, "://") {
-				needs, err := rc.Play(cx, src, title)
+			if len(args) == 1 && strings.Contains(args[0], "://") {
+				needs, err := rc.Play(cx, args[0], title)
 				if err != nil {
 					return err
 				}
 				if err := e.bringForward(cx, d, needs); err != nil {
 					return err
 				}
-				e.emit("playing "+src, map[string]any{"ok": true, "url": src})
+				e.emit("playing "+args[0], map[string]any{"ok": true, "url": args[0]})
 				return nil
 			}
-			// Local file: serve just that one file on an ephemeral port on
-			// the interface that reaches the TV.
-			abs, err := filepath.Abs(src)
+			files, err := cast.Expand(args)
 			if err != nil {
 				return err
 			}
-			if _, err := os.Stat(abs); err != nil {
-				return err
-			}
-			ip, err := localIPFor(rc.Host)
+			pl, err := cast.Start(cx, rc, d, files)
 			if err != nil {
 				return err
 			}
-			ln, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
-			if err != nil {
-				return err
+			defer pl.Close()
+			announce := func() {
+				i, n := pl.Index()
+				if !e.env.JSON {
+					fmt.Fprintf(e.env.Out, "playing %d/%d %s  (serving from %s, Ctrl-C to stop)\n", i+1, n, pl.Current(), pl.Addr())
+				}
 			}
-			name := filepath.Base(abs)
-			mux := http.NewServeMux()
-			mux.HandleFunc("/v/", func(w http.ResponseWriter, r *http.Request) {
-				// ServeFile handles Range requests, which is what lets the
-				// player seek.
-				http.ServeFile(w, r, abs)
-			})
-			srv := &http.Server{Handler: mux}
-			go srv.Serve(ln)
-			defer srv.Close()
-			url := fmt.Sprintf("http://%s/v/%s", ln.Addr().String(), urlSafe(name))
-			if title == "" {
-				title = strings.TrimSuffix(name, filepath.Ext(name))
-			}
-			needs, err := rc.Play(cx, url, title)
-			if err != nil {
-				return err
-			}
-			if err := e.bringForward(cx, d, needs); err != nil {
-				return err
-			}
-			if !e.env.JSON {
-				fmt.Fprintf(e.env.Out, "playing %s  (serving from %s, Ctrl-C to stop)\n", name, ln.Addr())
-			}
-			// Stay alive while the TV is playing or paused on our item;
-			// exit a little after it stops or moves on.
-			idle := 0
+			announce()
+			// Poll now-playing; advance when the current item ends, stop
+			// when the user leaves the player. A short grace period after
+			// each start covers the moment before the TV reports anything.
+			grace := 3
 			for {
 				select {
 				case <-cx.Done():
 					return nil
-				case <-time.After(3 * time.Second):
+				case <-time.After(2 * time.Second):
 				}
 				n, err := rc.Now(cx)
 				if err != nil {
 					continue
 				}
-				if n.App == "dev.tvctl.receiver" && (n.State == "playing" || n.State == "paused" || n.State == "buffering") {
-					idle = 0
+				if grace > 0 {
+					grace--
+					if n.App == cast.ReceiverPackage && n.State == "playing" {
+						grace = 0
+					}
 					continue
 				}
-				if idle++; idle >= 4 {
-					e.emit("done", map[string]any{"ok": true, "file": name})
+				if !cast.Finished(n) {
+					continue
+				}
+				if n.App != cast.ReceiverPackage {
+					e.emit("stopped", map[string]any{"ok": true, "reason": "left player"})
 					return nil
 				}
+				more, err := pl.Next(cx)
+				if err != nil {
+					return err
+				}
+				if !more {
+					e.emit("done", map[string]any{"ok": true, "played": len(files)})
+					return nil
+				}
+				grace = 3
+				announce()
 			}
 		},
 	}
-	c.Flags().StringVar(&title, "title", "", "title to show in the player and now-playing")
+	c.Flags().StringVar(&title, "title", "", "title to show for a URL")
 	return c
-}
-
-// localIPFor finds the local address the OS would use to reach host, by
-// "connecting" a UDP socket (no packets are sent).
-func localIPFor(host string) (string, error) {
-	c, err := net.Dial("udp", net.JoinHostPort(host, "9"))
-	if err != nil {
-		return "", err
-	}
-	defer c.Close()
-	return c.LocalAddr().(*net.UDPAddr).IP.String(), nil
-}
-
-func urlSafe(name string) string {
-	r := strings.NewReplacer(" ", "%20", "#", "%23", "?", "%3F")
-	return r.Replace(name)
 }
 
 func (e *cmds) toast() *cobra.Command {

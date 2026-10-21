@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/omAthalye/tvctl/internal/cast"
 	"github.com/omAthalye/tvctl/internal/cli"
 	"github.com/omAthalye/tvctl/internal/config"
 	"github.com/omAthalye/tvctl/internal/device"
@@ -89,6 +91,10 @@ type model struct {
 	nowAt    time.Time // when `now` was received, for extrapolation
 	keyboard string    // package asking for text, "" when none
 	events   chan receiver.Event
+
+	pl       *cast.Playlist // local files being served, nil when idle
+	plGrace  int            // now-events to ignore right after starting an item
+	lastShot string         // path of the last screenshot, for `view`
 }
 
 // Messages from background work.
@@ -103,6 +109,13 @@ type (
 	// eventMsg is one receiver event; rcStateMsg a connection change.
 	eventMsg receiver.Event
 	tickMsg  time.Time
+	// chosenMsg carries yazi's selection; execDoneMsg any other external
+	// program's exit.
+	chosenMsg struct {
+		paths []string
+		err   error
+	}
+	execDoneMsg struct{ err error }
 )
 
 func tick() tea.Cmd { return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) }) }
@@ -216,6 +229,24 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		return m, tick()
 
+	case chosenMsg:
+		if msg.err != nil {
+			m.say(styleErr.Render("  yazi: " + msg.err.Error()))
+			return m, nil
+		}
+		if len(msg.paths) == 0 {
+			m.say(styleDim.Render("  nothing chosen"))
+			return m, nil
+		}
+		m.playlistStart(msg.paths)
+		return m, nil
+
+	case execDoneMsg:
+		if msg.err != nil {
+			m.say(styleErr.Render("  " + msg.err.Error()))
+		}
+		return m, nil
+
 	case eventMsg:
 		switch msg.Type {
 		case "_offline":
@@ -224,6 +255,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rcState = "online"
 			m.now = msg.Now
 			m.nowAt = time.Now()
+			if m.pl != nil {
+				m.playlistObserve(msg.Now)
+			}
 		case "foreground":
 			m.rcState = "online"
 		case "keyboard":
@@ -243,6 +277,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case resultMsg:
 		m.running = ""
+		if msg.cmd == "shot" && msg.err == nil {
+			m.lastShot = strings.SplitN(msg.out, "\n", 2)[0]
+		}
 		m.say(stylePrompt.Render("> ") + msg.cmd)
 		out := strings.TrimRight(msg.out, "\n")
 		if msg.err != nil && out == "" {
@@ -426,6 +463,16 @@ func (m *model) resolve(line string) (argv []string, local func() tea.Cmd) {
 		}
 	case "help":
 		return nil, func() tea.Cmd { m.help(fields[1:]); return nil }
+	case "files":
+		return nil, func() tea.Cmd { return m.chooseFiles() }
+	case "next":
+		return nil, func() tea.Cmd { m.playlistNext(); return nil }
+	case "stop":
+		return nil, func() tea.Cmd { m.playlistStop("stopped"); return nil }
+	case "shot":
+		return nil, func() tea.Cmd { return m.screenshot() }
+	case "view":
+		return nil, func() tea.Cmd { return m.viewShot() }
 	}
 	for _, v := range m.verbs {
 		if head == v {
@@ -456,9 +503,174 @@ func (m *model) help(args []string) {
 		m.say("  <app name>        launch it (netflix, yt, or any prefix of an installed app)")
 		m.say("  <url>             open it (YouTube links play directly)")
 		m.say("  keys              remote mode: arrow keys go to the TV until esc")
+		m.say("  files             pick files or a folder in yazi, play them on the TV in order")
+		m.say("  next · stop       skip to the next file · end the playlist")
+		m.say("  shot · view       screenshot the TV · open the last one in yazi")
 		m.say("  help <command>    details for one command")
 		m.say("  clear · quit      ctrl+l also clears, ctrl+c quits")
 	}
+}
+
+// ---- files, playlist, screenshots ----------------------------------------
+
+// chooseFiles hands the terminal to yazi in chooser mode. tea.ExecProcess
+// suspends the TUI, runs the program, and restores the screen; the chosen
+// paths come back through the temp file yazi writes on confirm.
+func (m *model) chooseFiles() tea.Cmd {
+	if m.rc == nil {
+		m.say(styleErr.Render("  files needs the companion app: run tv setup"))
+		return nil
+	}
+	if _, err := exec.LookPath("yazi"); err != nil {
+		m.say(styleErr.Render("  yazi not found on PATH"))
+		return nil
+	}
+	f, err := os.CreateTemp("", "tvctl-chooser-")
+	if err != nil {
+		m.say(styleErr.Render("  " + err.Error()))
+		return nil
+	}
+	tmp := f.Name()
+	f.Close()
+	c := exec.Command("yazi", "--chooser-file="+tmp)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		defer os.Remove(tmp)
+		if err != nil {
+			return chosenMsg{err: err}
+		}
+		b, err := os.ReadFile(tmp)
+		if err != nil {
+			return chosenMsg{err: err}
+		}
+		var paths []string
+		for _, l := range strings.Split(string(b), "\n") {
+			if l = strings.TrimSpace(l); l != "" {
+				paths = append(paths, l)
+			}
+		}
+		return chosenMsg{paths: paths}
+	})
+}
+
+func (m *model) playlistStart(paths []string) {
+	files, err := cast.Expand(paths)
+	if err != nil {
+		m.say(styleErr.Render("  " + err.Error()))
+		return
+	}
+	m.playlistStop("")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	// Device for the basic-mode bring-forward path.
+	st, err := config.Load()
+	if err != nil {
+		m.say(styleErr.Render("  " + err.Error()))
+		return
+	}
+	_, ent, _ := st.Resolve("")
+	dev := firetv.New(ent.Host, ent.Name, ent.Token)
+	pl, err := cast.Start(ctx, m.rc, dev, files)
+	if err != nil {
+		m.say(styleErr.Render("  " + err.Error()))
+		return
+	}
+	m.pl = pl
+	m.plGrace = 3
+	m.sayPlaylist()
+}
+
+func (m *model) sayPlaylist() {
+	i, n := m.pl.Index()
+	m.say(fmt.Sprintf("  ▶ %d/%d %s  %s", i+1, n, m.pl.Current(), styleDim.Render("(serving from "+m.pl.Addr()+")")))
+}
+
+// playlistObserve is called on every now event while a playlist runs:
+// advance when the item ends, stop when the user leaves the player.
+func (m *model) playlistObserve(n *receiver.Now) {
+	if m.plGrace > 0 {
+		m.plGrace--
+		if n.App == cast.ReceiverPackage && n.State == "playing" {
+			m.plGrace = 0
+		}
+		return
+	}
+	if !cast.Finished(n) {
+		return
+	}
+	if n.App != cast.ReceiverPackage {
+		m.playlistStop("left the player")
+		return
+	}
+	m.playlistNext()
+}
+
+func (m *model) playlistNext() {
+	if m.pl == nil {
+		m.say(styleDim.Render("  no playlist running"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	more, err := m.pl.Next(ctx)
+	if err != nil {
+		m.say(styleErr.Render("  " + err.Error()))
+		return
+	}
+	if !more {
+		m.playlistStop("finished")
+		return
+	}
+	m.plGrace = 3
+	m.sayPlaylist()
+}
+
+func (m *model) playlistStop(why string) {
+	if m.pl == nil {
+		return
+	}
+	m.pl.Close()
+	m.pl = nil
+	if why != "" {
+		m.say(styleDim.Render("  playlist " + why))
+	}
+}
+
+// screenshot saves a PNG under ~/Pictures/tv and remembers it for `view`.
+func (m *model) screenshot() tea.Cmd {
+	if m.rc == nil {
+		m.say(styleErr.Render("  shot needs the companion app: run tv setup"))
+		return nil
+	}
+	m.running = "shot"
+	rc := m.rc
+	return func() tea.Msg {
+		t0 := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		png, err := rc.Screenshot(ctx)
+		if err != nil {
+			return resultMsg{cmd: "shot", err: err, took: time.Since(t0)}
+		}
+		home, _ := os.UserHomeDir()
+		dir := home + "/Pictures/tv"
+		_ = os.MkdirAll(dir, 0o755)
+		path := dir + "/" + time.Now().Format("2006-01-02_15-04-05") + ".png"
+		if err := os.WriteFile(path, png, 0o644); err != nil {
+			return resultMsg{cmd: "shot", err: err, took: time.Since(t0)}
+		}
+		return resultMsg{cmd: "shot", out: path + "\n(type view to open it in yazi)", took: time.Since(t0)}
+	}
+}
+
+// viewShot opens the last screenshot in yazi, which previews images
+// inline using whatever graphics protocol the terminal supports.
+func (m *model) viewShot() tea.Cmd {
+	if m.lastShot == "" {
+		m.say(styleDim.Render("  no screenshot yet: type shot"))
+		return nil
+	}
+	c := exec.Command("yazi", m.lastShot)
+	return tea.ExecProcess(c, func(err error) tea.Msg { return execDoneMsg{err: err} })
 }
 
 // ---- completion -----------------------------------------------------------
@@ -478,7 +690,7 @@ func (m *model) complete() {
 	switch {
 	case typingFirst:
 		cands = append(cands, m.verbs...)
-		cands = append(cands, "help", "keys", "clear", "quit")
+		cands = append(cands, "help", "keys", "clear", "quit", "files", "next", "stop", "shot", "view")
 		for a := range cli.Aliases {
 			cands = append(cands, a)
 		}
@@ -582,6 +794,9 @@ func (m *model) View() string {
 	switch {
 	case m.running != "":
 		status = "running: " + m.running
+	case m.pl != nil:
+		i, n := m.pl.Index()
+		status = fmt.Sprintf("playlist %d/%d %s  ·  next · stop", i+1, n, m.pl.Current())
 	case m.mode == modeKeys:
 		status = "KEYS  arrows · enter · backspace · h m space + - 0 < >  ·  esc to leave"
 	default:
