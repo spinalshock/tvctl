@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">tvctl receiver</string>
+    <string name="accessibility_description">Lets the tvctl command line see which app is in front, when the TV asks for text, and take screenshots. It only checks whether the focused field is editable.</string>
+    <string name="notif_channel">tvctl</string>
+    <string name="notif_text">tvctl receiver is listening</string>
+</resources>

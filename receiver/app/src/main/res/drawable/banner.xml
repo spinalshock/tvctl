@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Leanback launchers want a 320x180 banner; a vector at that ratio works. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp" android:height="180dp"
+    android:viewportWidth="320" android:viewportHeight="180">
+    <path android:fillColor="#101418" android:pathData="M0,0h320v180h-320z" />
+    <path android:fillColor="#5FB3F2"
+        android:pathData="M60,60 L100,90 L60,120 L50,110 L77,90 L50,70 Z" />
+    <path android:fillColor="#E6E6E6" android:pathData="M110,108h60v12h-60z" />
+    <path android:fillColor="#9AA0A6" android:pathData="M190,80h80v8h-80z M190,96h56v8h-56z" />
+</vector>

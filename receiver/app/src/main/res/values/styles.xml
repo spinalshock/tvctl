@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.Tvctl" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">#101418</item>
+        <item name="android:textColor">#E6E6E6</item>
+    </style>
+</resources>
