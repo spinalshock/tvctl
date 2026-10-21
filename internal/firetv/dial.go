@@ -30,9 +30,18 @@ func dialURL(host, app string) string {
 // dialLaunch POSTs to a DIAL app endpoint. body is the app-specific payload
 // (empty for FireTVRemote). 200 and 201 both mean "running".
 func dialLaunch(ctx context.Context, host, app, body string) error {
+	return dialLaunchWith(ctx, host, app, body, nil)
+}
+
+// dialLaunchWith is dialLaunch with extra headers, for apps that gate their
+// DIAL endpoint on an Origin (YouTube).
+func dialLaunchWith(ctx context.Context, host, app, body string, hdr map[string]string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, dialURL(host, app), strings.NewReader(body))
 	if err != nil {
 		return err
+	}
+	for k, v := range hdr {
+		req.Header.Set(k, v)
 	}
 	// DIAL servers are picky: an explicit Content-Length even for an empty
 	// body, and text/plain for payloads.

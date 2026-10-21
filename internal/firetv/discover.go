@@ -102,12 +102,25 @@ func browse(ctx context.Context, service string, hit func(ip, name string)) {
 	go func() {
 		for e := range entries {
 			for _, ip := range e.AddrIPv4 {
-				hit(ip.String(), e.Instance)
+				hit(ip.String(), unescapeMDNS(e.Instance))
 			}
 		}
 	}()
 	_ = r.Browse(ctx, service, "local.", entries)
 	<-ctx.Done()
+}
+
+// unescapeMDNS undoes the backslash escaping mDNS applies to instance names
+// ("Living\ Room\ Fire\ TV" -> "Living Room Fire TV").
+func unescapeMDNS(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // ssdp sends one multicast M-SEARCH for DIAL and collects responders until

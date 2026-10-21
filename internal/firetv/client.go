@@ -47,12 +47,12 @@ const (
 // Client is one Fire TV. Zero Token means "not paired yet": only the pin
 // routes work in that state.
 type Client struct {
-	Host  string
-	Name  string
+	Host   string
+	Name   string
 	Serial string
-	MAC   string
-	Token string
-	http  *http.Client
+	MAC    string
+	Token  string
+	http   *http.Client
 }
 
 // New builds a client. The TLS config skips verification because the TV

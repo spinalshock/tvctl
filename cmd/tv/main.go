@@ -188,6 +188,17 @@ stored in ` + mustPath() + ` and survives TV reboots.`,
 			if err != nil {
 				return fmt.Errorf("paired but status failed: %w", err)
 			}
+			// With an explicit host we still want the TV's own name; a quick
+			// discovery usually has it. Fall back to a generic label.
+			if name == "" {
+				if found, _ := firetv.Discover(cx, 1500*time.Millisecond); found != nil {
+					for _, f := range found {
+						if f.Host == host {
+							name = f.Name
+						}
+					}
+				}
+			}
 			if name == "" {
 				name = "Fire TV"
 			}

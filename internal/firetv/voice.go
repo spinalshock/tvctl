@@ -78,5 +78,7 @@ func (c *Client) Say(ctx context.Context, phrase string) error {
 	}
 	// A short tail of silence helps the endpointer decide the phrase ended.
 	time.Sleep(300 * time.Millisecond)
-	return ws.Close(websocket.StatusNormalClosure, "")
+	// The TV never answers the WebSocket close handshake; it treats the TCP
+	// close itself as end-of-utterance. CloseNow skips the handshake wait.
+	return ws.CloseNow()
 }
