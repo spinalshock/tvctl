@@ -86,6 +86,11 @@ type Waker interface {
 	Wake(ctx context.Context) error
 }
 
+// KeyboardWatcher reports whether the TV is currently asking for text.
+type KeyboardWatcher interface {
+	KeyboardOpen(ctx context.Context) (open bool, current string, err error)
+}
+
 // Statuser returns brand-specific diagnostics for `tv status --json`.
 type Statuser interface {
 	Status(ctx context.Context) (map[string]any, error)

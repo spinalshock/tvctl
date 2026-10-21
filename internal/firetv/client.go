@@ -14,7 +14,8 @@
 //   - POST /v1/media?action=play|scan                media keys
 //   - GET  /v1/FireTV/appsV2                         installed apps
 //   - POST /v1/FireTV/app/<package>                  launch app
-//   - POST /v1/FireTV/text {"text"}                  type into focused field
+//   - POST /v1/FireTV/keyboard {"text"}              type into focused field
+//   - GET  /v1/FireTV/keyboard                       keyboard state
 //   - GET  /v1/FireTV/properties                     device facts
 package firetv
 
@@ -243,8 +244,27 @@ func (c *Client) Key(ctx context.Context, k device.Key) error {
 }
 
 // Text types a whole string into whatever field has focus on the TV.
+// The route is /keyboard; /text exists but rejects every body shape.
 func (c *Client) Text(ctx context.Context, s string) error {
-	return c.do(ctx, http.MethodPost, "/v1/FireTV/text", map[string]string{"text": s}, nil)
+	return c.do(ctx, http.MethodPost, "/v1/FireTV/keyboard", map[string]string{"text": s}, nil)
+}
+
+// Keyboard is the TV's on-screen keyboard state as the API reports it.
+// State is "hidden" or a visible state; Text is the field's current
+// contents when known.
+type Keyboard struct {
+	Mode  *string `json:"mode"`
+	State string  `json:"state"`
+	Text  *string `json:"text"`
+}
+
+// KeyboardState polls the keyboard; cheap enough to call every second.
+func (c *Client) KeyboardState(ctx context.Context) (*Keyboard, error) {
+	var k Keyboard
+	if err := c.do(ctx, http.MethodGet, "/v1/FireTV/keyboard", nil, &k); err != nil {
+		return nil, err
+	}
+	return &k, nil
 }
 
 // appV2 is the TV's app record; we keep only what the UI needs.
@@ -297,4 +317,17 @@ func (c *Client) Wake(ctx context.Context) error {
 		return err
 	}
 	return c.Key(ctx, device.KeyWake)
+}
+
+// KeyboardOpen implements device.KeyboardWatcher.
+func (c *Client) KeyboardOpen(ctx context.Context) (bool, string, error) {
+	k, err := c.KeyboardState(ctx)
+	if err != nil {
+		return false, "", err
+	}
+	cur := ""
+	if k.Text != nil {
+		cur = *k.Text
+	}
+	return k.State != "" && k.State != "hidden", cur, nil
 }

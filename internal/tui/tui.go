@@ -29,6 +29,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/omAthalye/tvctl/internal/cast"
 	"github.com/omAthalye/tvctl/internal/cli"
@@ -92,6 +93,9 @@ type model struct {
 	keyboard string    // package asking for text, "" when none
 	events   chan receiver.Event
 
+	dev      device.Device  // stock-API driver, for keyboard polling and typing
+	typing   bool           // TV keyboard is open: Enter sends the line as text
+	tvText   string         // what the TV's field currently holds
 	pl       *cast.Playlist // local files being served, nil when idle
 	plGrace  int            // now-events to ignore right after starting an item
 	lastShot string         // path of the last screenshot, for `view`
@@ -109,6 +113,11 @@ type (
 	// eventMsg is one receiver event; rcStateMsg a connection change.
 	eventMsg receiver.Event
 	tickMsg  time.Time
+	// kbMsg is the result of one keyboard-state poll.
+	kbMsg struct {
+		open bool
+		text string
+	}
 	// chosenMsg carries yazi's selection; execDoneMsg any other external
 	// program's exit.
 	chosenMsg struct {
@@ -130,8 +139,9 @@ func newModel() (*model, error) {
 		return nil, err
 	}
 	in := textinput.New()
-	in.Prompt = "> "
-	in.Placeholder = "netflix · youtube.com/watch?v=… · vol up 3 · say switch to hdmi 1 · help"
+	in.Prompt = "❯ "
+	in.PromptStyle = stylePrompt
+	in.Placeholder = "command, app, search or link · help"
 	in.Focus()
 	in.CharLimit = 512
 	m := &model{
@@ -147,16 +157,35 @@ func newModel() (*model, error) {
 		m.rc = receiver.New(ent.Host, ent.ReceiverToken)
 		m.rcState = "offline"
 	}
+	m.dev = firetv.New(ent.Host, ent.Name, ent.Token)
 	m.say(styleDim.Render("tvctl · type help for commands, keys for remote mode, quit to exit"))
 	return m, nil
 }
 
 func (m *model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textinput.Blink, loadApps()}
+	cmds := []tea.Cmd{textinput.Blink, loadApps(), tick(), m.pollKeyboard()}
 	if m.rc != nil {
-		cmds = append(cmds, m.connectEvents(), m.waitEvent(), tick())
+		cmds = append(cmds, m.connectEvents(), m.waitEvent())
 	}
 	return tea.Batch(cmds...)
+}
+
+// pollKeyboard asks the TV every 1.5 s whether its keyboard is up. It's a
+// tiny local HTTP call, and it's the only way to know in basic mode.
+func (m *model) pollKeyboard() tea.Cmd {
+	kw, ok := m.dev.(device.KeyboardWatcher)
+	if !ok {
+		return nil
+	}
+	return tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		open, cur, err := kw.KeyboardOpen(ctx)
+		if err != nil {
+			return kbMsg{}
+		}
+		return kbMsg{open: open, text: cur}
+	})
 }
 
 // connectEvents holds the receiver socket open for the TUI's lifetime,
@@ -229,6 +258,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		return m, tick()
 
+	case kbMsg:
+		if msg.open && !m.typing {
+			m.typing = true
+			m.say(styleAccent.Render("⌨ ") + styleText.Render("the TV is asking for text — type it and press Enter (Esc to cancel)"))
+		} else if !msg.open && m.typing {
+			m.typing = false
+		}
+		m.tvText = msg.text
+		return m, m.pollKeyboard()
+
 	case chosenMsg:
 		if msg.err != nil {
 			m.say(styleErr.Render("  yazi: " + msg.err.Error()))
@@ -280,19 +319,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.cmd == "shot" && msg.err == nil {
 			m.lastShot = strings.SplitN(msg.out, "\n", 2)[0]
 		}
-		m.say(stylePrompt.Render("> ") + msg.cmd)
+		m.say(stylePrompt.Render("› ") + styleBold.Render(msg.cmd) + styleDim.Render(fmt.Sprintf("   %.1fs", msg.took.Seconds())))
 		out := strings.TrimRight(msg.out, "\n")
 		if msg.err != nil && out == "" {
-			out = "tv: " + msg.err.Error()
+			out = msg.err.Error()
 		}
 		for _, l := range strings.Split(out, "\n") {
+			l = strings.TrimPrefix(l, "tv: ")
 			if msg.err != nil {
 				m.say("  " + styleErr.Render(l))
 			} else {
-				m.say("  " + l)
+				m.say("  " + styleText.Render(l))
 			}
 		}
-		m.say(styleDim.Render(fmt.Sprintf("  %.1fs", msg.took.Seconds())))
 		return m, nil
 
 	case tea.KeyMsg:
@@ -356,12 +395,20 @@ func (m *model) updatePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if line == "" {
 			return m, nil
 		}
+		if m.typing && !m.isCommand(line) {
+			// The TV has a text field open: send the line as typed.
+			return m, m.dispatch("text " + line)
+		}
 		m.history = append(m.history, line)
 		m.histPos = len(m.history)
 		return m, m.dispatch(line)
 	case tea.KeyEsc:
 		m.input.SetValue("")
 		m.suggests = nil
+		if m.typing {
+			m.typing = false
+			m.say(styleDim.Render("  typing mode off (the TV's keyboard is still open)"))
+		}
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -474,8 +521,14 @@ func (m *model) resolve(line string) (argv []string, local func() tea.Cmd) {
 	case "view":
 		return nil, func() tea.Cmd { return m.viewShot() }
 	}
+	// A bare app word launches the app even when a verb of the same name
+	// exists for searching ("netflix" launches, "netflix dark" searches).
+	if _, isAlias := cli.Aliases[head]; isAlias && len(fields) == 1 {
+		return []string{"app", head}, nil
+	}
 	for _, v := range m.verbs {
 		if head == v {
+			fields[0] = head // verbs are lowercase; accept "YouTube foo"
 			return fields, nil
 		}
 	}
@@ -485,6 +538,22 @@ func (m *model) resolve(line string) (argv []string, local func() tea.Cmd) {
 	// Anything else is an app name; ResolveApp handles aliases and
 	// prefixes and produces the "did you mean" error.
 	return []string{"app", line}, nil
+}
+
+// isCommand reports whether the first word is a verb or built-in, so that
+// `vol up` still works while the TV's keyboard is open.
+func (m *model) isCommand(line string) bool {
+	head := strings.ToLower(strings.Fields(line)[0])
+	switch head {
+	case "quit", "exit", "clear", "keys", "help", "files", "next", "stop", "shot", "view", "text":
+		return true
+	}
+	for _, v := range m.verbs {
+		if head == v {
+			return true
+		}
+	}
+	return false
 }
 
 // help renders cobra's own help for the root or one verb into the
@@ -760,28 +829,53 @@ func dedupe(in []string) []string {
 // ---- view -----------------------------------------------------------------
 
 var (
-	styleHeader = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("24")).Padding(0, 1)
-	styleStatus = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Background(lipgloss.Color("236")).Padding(0, 1)
-	styleDim    = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	styleErr    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	styleBold   = lipgloss.NewStyle().Bold(true)
-	stylePrompt = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
-	styleSug    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	styleSugSel = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("238"))
-	styleHit    = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
+	accent  = lipgloss.Color("81")  // light blue: prompt, playing, matches
+	fgText  = lipgloss.Color("252") // output text
+	fgDim   = lipgloss.Color("243") // metadata, hints
+	fgErr   = lipgloss.Color("203")
+	okGreen = lipgloss.Color("78")
+	warn    = lipgloss.Color("221")
+	rule    = lipgloss.Color("238")
+
+	styleText   = lipgloss.NewStyle().Foreground(fgText)
+	styleDim    = lipgloss.NewStyle().Foreground(fgDim)
+	styleErr    = lipgloss.NewStyle().Foreground(fgErr)
+	styleBold   = lipgloss.NewStyle().Bold(true).Foreground(fgText)
+	stylePrompt = lipgloss.NewStyle().Foreground(accent).Bold(true)
+	styleAccent = lipgloss.NewStyle().Foreground(accent)
+	styleTitle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255"))
+	styleSug    = lipgloss.NewStyle().Foreground(fgDim)
+	styleSugSel = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(rule)
+	styleHit    = lipgloss.NewStyle().Foreground(accent).Bold(true)
+	styleRule   = lipgloss.NewStyle().Foreground(rule)
+	styleBarOn  = lipgloss.NewStyle().Foreground(accent)
+	styleBarOff = lipgloss.NewStyle().Foreground(rule)
 )
 
 func (m *model) View() string {
 	if m.width == 0 {
 		return ""
 	}
-	header := styleHeader.Width(m.width).Render(
-		fmt.Sprintf("%s  %s  ·  receiver: %s", m.devName, m.devHost, m.rcState))
-	nowLine := styleDim.Render("  now: " + m.describeNow())
+	w := m.width
+	hr := styleRule.Render(strings.Repeat("─", w))
+
+	// Header: centred, no fill. A coloured dot carries the receiver state.
+	dot, state := styleDim.Render("○"), m.rcState
+	switch m.rcState {
+	case "online":
+		dot = lipgloss.NewStyle().Foreground(okGreen).Render("●")
+	case "offline":
+		dot = styleErr.Render("●")
+	case "not set up":
+		dot = lipgloss.NewStyle().Foreground(warn).Render("●")
+		state = "receiver not set up · tv setup"
+	}
+	title := styleBold.Render(m.devName) + styleDim.Render("  "+m.devHost+"  ·  "+state+" ")
+	header := lipgloss.PlaceHorizontal(w, lipgloss.Center, dot+" "+title)
 
 	var sug strings.Builder
-	for i, s := range m.suggests {
-		line := "  " + highlight(s)
+	for i, sg := range m.suggests {
+		line := "  " + highlight(sg)
 		if i == m.sugSel {
 			line = styleSugSel.Render(line)
 		} else {
@@ -793,47 +887,113 @@ func (m *model) View() string {
 	var status string
 	switch {
 	case m.running != "":
-		status = "running: " + m.running
+		status = styleAccent.Render("… ") + styleDim.Render(m.running)
 	case m.pl != nil:
 		i, n := m.pl.Index()
-		status = fmt.Sprintf("playlist %d/%d %s  ·  next · stop", i+1, n, m.pl.Current())
+		status = styleDim.Render(fmt.Sprintf("playlist %d/%d %s  ·  next · stop", i+1, n, m.pl.Current()))
 	case m.mode == modeKeys:
-		status = "KEYS  arrows · enter · backspace · h m space + - 0 < >  ·  esc to leave"
+		status = styleAccent.Render("KEYS ") + styleDim.Render("arrows · enter · backspace · h m space + - 0 < >  ·  esc to leave")
 	default:
-		status = "tab complete · ↑↓ history · help · keys · quit"
+		status = styleDim.Render("tab complete · ↑↓ history · help · keys · quit")
 	}
-	statusBar := styleStatus.Width(m.width).Render(status)
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		header,
-		nowLine,
-		m.view.View(),
-		strings.TrimRight(sug.String(), "\n"),
-		m.input.View(),
-		statusBar,
-	)
+	parts := []string{header, hr, m.renderNow(w), hr, m.view.View()}
+	if sug.Len() > 0 {
+		parts = append(parts, strings.TrimRight(sug.String(), "\n"))
+	}
+	if m.typing {
+		m.input.Prompt = "⌨ "
+		status = styleAccent.Render("TYPING ") + styleDim.Render("Enter sends to the TV · Esc leaves · commands still work")
+	} else {
+		m.input.Prompt = "❯ "
+	}
+	parts = append(parts, hr, m.input.View(), status)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
-// describeNow renders the now line, extrapolating the position from the
-// last snapshot so the clock ticks between events.
-func (m *model) describeNow() string {
+// renderNow draws the two-line now-playing block: state, app and title on
+// the first line; a progress bar with the clock on the second.
+func (m *model) renderNow(w int) string {
+	empty := styleBarOff.Render("  " + strings.Repeat("╌", max(0, w-4)))
 	if m.rc == nil {
-		return "run tv setup for now-playing, screenshots and local files"
+		return styleDim.Render("  now-playing, screenshots and local files need the companion app: tv setup") + "\n" + empty
 	}
-	if m.now == nil {
-		return "–"
+	n := m.now
+	if n == nil || n.Source == nil {
+		fg := ""
+		if n != nil && n.Foreground != nil {
+			fg = "  ·  " + shortApp(*n.Foreground)
+		}
+		return styleDim.Render("  nothing playing"+fg) + "\n" + empty
 	}
-	n := *m.now
-	if n.State == "playing" && n.Speed > 0 && n.UpdatedMs > 0 {
-		// updated_ms is the TV's uptime clock for system sessions and wall
-		// time for our player; either way the delta since we received the
-		// snapshot is what matters, so we track receipt time instead.
-		n.PositionMs += int64(time.Since(m.nowAt).Seconds() * 1000 * n.Speed)
-		if n.DurationMs > 0 && n.PositionMs > n.DurationMs {
-			n.PositionMs = n.DurationMs
+	// Extrapolate the position while playing so the bar moves between events.
+	pos := n.PositionMs
+	if n.State == "playing" && n.Speed > 0 {
+		pos += int64(time.Since(m.nowAt).Seconds() * 1000 * n.Speed)
+		if n.DurationMs > 0 && pos > n.DurationMs {
+			pos = n.DurationMs
 		}
 	}
-	return n.Describe()
+	sym := map[string]string{"playing": "▶", "paused": "⏸", "buffering": "◌", "stopped": "■"}[n.State]
+	if sym == "" {
+		sym = "·"
+	}
+	symStyle := styleAccent
+	if n.State != "playing" {
+		symStyle = styleDim
+	}
+	title := ""
+	if n.Title != nil {
+		title = *n.Title
+	}
+	if n.Artist != nil && *n.Artist != "" {
+		title = *n.Artist + "  —  " + title
+	}
+	left := "  " + symStyle.Render(sym) + " " + styleAccent.Render(shortApp(n.App)) + "   "
+	avail := w - lipgloss.Width(left) - 2
+	line1 := left + styleTitle.Render(ansi.Truncate(title, max(0, avail), "…"))
+
+	clock := fmtClock(pos)
+	if n.DurationMs > 0 {
+		clock += " / " + fmtClock(n.DurationMs)
+	}
+	barW := w - 4 - lipgloss.Width(clock) - 2
+	if barW < 10 {
+		barW = 10
+	}
+	filled := 0
+	if n.DurationMs > 0 {
+		filled = min(barW, int(float64(barW)*float64(pos)/float64(n.DurationMs)))
+	}
+	bar := styleBarOn.Render(strings.Repeat("━", filled)) + styleBarOff.Render(strings.Repeat("─", barW-filled))
+	return line1 + "\n" + "  " + bar + "  " + styleDim.Render(clock)
+}
+
+func fmtClock(ms int64) string {
+	s := ms / 1000
+	if s >= 3600 {
+		return fmt.Sprintf("%d:%02d:%02d", s/3600, s%3600/60, s%60)
+	}
+	return fmt.Sprintf("%d:%02d", s/60, s%60)
+}
+
+func shortApp(pkg string) string {
+	known := map[string]string{
+		"com.netflix.ninja":                 "Netflix",
+		"com.amazon.firetv.youtube":         "YouTube",
+		"com.spotify.tv.android":            "Spotify",
+		"com.amazon.avod":                   "Prime Video",
+		"com.amazon.cloud9":                 "Silk",
+		"com.amazon.venezia":                "Appstore",
+		"com.spocky.projengmenu":            "Projectivy",
+		"com.amazon.tv.launcher":            "Fire TV Home",
+		"dev.tvctl.receiver":                "tvctl player",
+		"com.onemainstream.sonyliv.android": "Sony LIV",
+	}
+	if n, ok := known[pkg]; ok {
+		return n
+	}
+	return pkg
 }
 
 // highlight bolds the matched characters of a suggestion.
@@ -855,10 +1015,7 @@ func highlight(s match) string {
 // always fit; the scrollback takes whatever is left.
 func (m *model) layout() {
 	sugLines := len(m.suggests)
-	if sugLines == 0 {
-		sugLines = 1 // JoinVertical renders the empty block as one line
-	}
-	h := m.height - 1 - 1 - sugLines - 1 - 1 // header, now line, suggestions, prompt, status
+	h := m.height - 1 - 1 - 2 - 1 - sugLines - 1 - 1 - 1 // header, rule, now, rule, suggestions, rule, prompt, status
 	if h < 3 {
 		h = 3
 	}
@@ -878,7 +1035,13 @@ func (m *model) say(line string) {
 	m.refresh()
 }
 
+// refresh pins the newest output just above the prompt, like a terminal:
+// when there's less content than space, blank lines are added on top.
 func (m *model) refresh() {
-	m.view.SetContent(strings.Join(m.lines, "\n"))
+	lines := m.lines
+	if pad := m.view.Height - len(lines); pad > 0 {
+		lines = append(make([]string, pad), lines...)
+	}
+	m.view.SetContent(strings.Join(lines, "\n"))
 	m.view.GotoBottom()
 }

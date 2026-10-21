@@ -59,6 +59,7 @@ func Root(env *Env) *cobra.Command {
 		e.discover(), e.pair(), e.key(), e.vol(), e.apps(), e.app(),
 		e.text(), e.url(), e.say(), e.sleep(), e.wake(), e.status(), e.devices(),
 		e.setup(), e.now(), e.events(), e.play(), e.toast(), e.shot(), e.initCmd(),
+		e.yt(), e.netflixSearch(),
 	)
 	return root
 }
@@ -476,30 +477,7 @@ func (e *cmds) url() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// YouTube goes through the lounge protocol, which needs no app
-			// on the TV. Everything else is best handled by Android's own
-			// URL routing via the companion app (Netflix titles deep-link,
-			// web pages open in Silk); fall back to the stock route if the
-			// app isn't set up.
-			id, _, st, _ := e.open()
-			ent := st.Devices[id]
-			if ent.ReceiverToken != "" && !strings.Contains(strings.ToLower(args[0]), "youtu") {
-				rc := receiver.New(ent.Host, ent.ReceiverToken)
-				needs, err := rc.Open(cx, args[0], "")
-				if err == nil {
-					err = e.bringForward(cx, d, needs)
-				}
-				if err != nil {
-					return err
-				}
-				e.emit("ok (via receiver)", map[string]any{"ok": true, "url": args[0], "via": "receiver"})
-				return nil
-			}
-			o, err := need[device.URLOpener](d, "opening URLs")
-			if err != nil {
-				return err
-			}
-			if err := o.OpenURL(cx, args[0]); err != nil {
+			if err := e.openURL(cx, d, args[0]); err != nil {
 				return err
 			}
 			e.emit("ok", map[string]any{"ok": true, "url": args[0]})
@@ -651,4 +629,26 @@ func (e *cmds) devices() *cobra.Command {
 func mustPath() string {
 	p, _ := config.Path()
 	return p
+}
+
+// openURL routes a link. YouTube goes through the lounge protocol, which
+// needs no app on the TV. Everything else is best handled by Android's own
+// URL routing via the companion app (Netflix titles deep-link, web pages
+// open in Silk); without the app, fall back to the stock route.
+func (e *cmds) openURL(cx context.Context, d device.Device, link string) error {
+	id, _, st, _ := e.open()
+	ent := st.Devices[id]
+	if ent.ReceiverToken != "" && !strings.Contains(strings.ToLower(link), "youtu") {
+		rc := receiver.New(ent.Host, ent.ReceiverToken)
+		needs, err := rc.Open(cx, link, "")
+		if err != nil {
+			return err
+		}
+		return e.bringForward(cx, d, needs)
+	}
+	o, err := need[device.URLOpener](d, "opening URLs")
+	if err != nil {
+		return err
+	}
+	return o.OpenURL(cx, link)
 }
