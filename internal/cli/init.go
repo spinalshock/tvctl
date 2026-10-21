@@ -66,7 +66,7 @@ const zshInit = `# tvctl shell integration: %[1]s fronts %[2]s
 %[1]s() {
   if [ $# -eq 0 ]; then TVCTL_ALIAS=%[1]s command %[2]s; else TVCTL_ALIAS=%[1]s command %[2]s "$@"; fi
 }
-if (( $+functions[compdef] )); then
+if command -v compdef >/dev/null 2>&1; then
   eval "$(command %[3]s completion zsh 2>/dev/null)"
   compdef _%[3]s %[4]s 2>/dev/null
 fi
