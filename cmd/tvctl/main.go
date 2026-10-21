@@ -1,4 +1,4 @@
-// Command tv: with arguments it runs one CLI command; with none it opens the
+// Command tvctl: with arguments it runs one CLI command; with none it opens the
 // TUI. Both share the command tree in internal/cli.
 package main
 

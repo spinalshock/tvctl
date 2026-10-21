@@ -6,12 +6,12 @@ JAVA_HOME ?= /opt/homebrew/opt/openjdk@17
 
 .PHONY: all apk test
 all:
-	go build -o tv ./cmd/tv
+	go build -o tvctl ./cmd/tvctl
 
 apk:
 	cd receiver && JAVA_HOME=$(JAVA_HOME) PATH=$(JAVA_HOME)/bin:$$PATH ./gradlew assembleDebug -q
 	cp receiver/app/build/outputs/apk/debug/app-debug.apk internal/setup/receiver.apk
-	go build -o tv ./cmd/tv
+	go build -o tvctl ./cmd/tvctl
 
 test:
 	go test ./...

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sort"
 	"strconv"
@@ -44,7 +45,7 @@ type Env struct {
 // executions would leak --json from one prompt line into the next.
 func Root(env *Env) *cobra.Command {
 	root := &cobra.Command{
-		Use:           "tv",
+		Use:           invokedAs(),
 		Short:         "Control your TV from the terminal",
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -57,7 +58,7 @@ func Root(env *Env) *cobra.Command {
 	root.AddCommand(
 		e.discover(), e.pair(), e.key(), e.vol(), e.apps(), e.app(),
 		e.text(), e.url(), e.say(), e.sleep(), e.wake(), e.status(), e.devices(),
-		e.setup(), e.now(), e.events(), e.play(), e.toast(), e.shot(),
+		e.setup(), e.now(), e.events(), e.play(), e.toast(), e.shot(), e.initCmd(),
 	)
 	return root
 }
@@ -90,6 +91,18 @@ func Verbs() []string {
 
 // cmds carries env into the command constructors.
 type cmds struct{ env *Env }
+
+// invokedAs is the name help text uses: "tvctl" when run directly, but
+// usually "tv" because the shell function from `tvctl init` execs the
+// binary under that name via the TVCTL_ALIAS it exports.
+func invokedAs() string {
+	if a := os.Getenv("TVCTL_ALIAS"); a != "" {
+		return a
+	}
+	return "tvctl"
+}
+
+var execLookPath = exec.LookPath
 
 // ---- plumbing -------------------------------------------------------------
 

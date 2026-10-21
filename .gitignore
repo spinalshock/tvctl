@@ -1,4 +1,5 @@
 /tv
+/tvctl
 /dist/
 *.wav
 receiver/.gradle/
