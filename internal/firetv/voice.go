@@ -60,6 +60,12 @@ func (c *Client) Say(ctx context.Context, phrase string) error {
 	}
 
 	const frame = tts.SampleRate * tts.Channels * (tts.BitDepth / 8) / 10 // 100 ms
+	// Pad with real silence on both ends. A person holding the mic button
+	// pauses before and after speaking; the recogniser expects that gap and
+	// drops the first syllable when audio begins the instant the socket
+	// opens. The pause must be audio frames, not a sleep: silence the
+	// server never receives is not silence it can hear.
+	pcm = append(append(make([]byte, 5*frame, 5*frame+len(pcm)+8*frame), pcm...), make([]byte, 8*frame)...)
 	for off := 0; off < len(pcm); off += frame {
 		end := off + frame
 		if end > len(pcm) {
@@ -76,8 +82,6 @@ func (c *Client) Say(ctx context.Context, phrase string) error {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	// A short tail of silence helps the endpointer decide the phrase ended.
-	time.Sleep(300 * time.Millisecond)
 	// The TV never answers the WebSocket close handshake; it treats the TCP
 	// close itself as end-of-utterance. CloseNow skips the handshake wait.
 	return ws.CloseNow()
