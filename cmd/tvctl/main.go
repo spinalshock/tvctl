@@ -23,6 +23,11 @@ func main() {
 	}
 	env := &cli.Env{Out: os.Stdout, Ask: askStdin}
 	if err := cli.Run(os.Args[1:], env); err != nil {
+		// `tv watch cmd` ends with cmd's status so scripts can chain on it.
+		var ec interface{ ExitCode() int }
+		if errors.As(err, &ec) {
+			os.Exit(ec.ExitCode())
+		}
 		os.Exit(1)
 	}
 }

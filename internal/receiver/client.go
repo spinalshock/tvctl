@@ -280,3 +280,45 @@ func shortApp(pkg string) string {
 	}
 	return pkg
 }
+
+// OverlayOpts styles the on-screen text panel. Zero values mean "leave as
+// is" so a stream of appends doesn't keep restating the look.
+type OverlayOpts struct {
+	Title    string  // header line; "" hides it (only sent when HasTitle)
+	HasTitle bool    // Title is meaningful even when empty
+	Pos      string  // bottom (default), top, left, right, full
+	MaxLines int     // rows kept; older lines scroll off
+	Opacity  float64 // panel background, 0..1
+	Size     float64 // text size in sp
+	Width    float64 // fraction of screen for left/right panels
+}
+
+// Overlay shows the panel (creating it if needed) with these lines. With
+// appendMode the lines extend the buffer; otherwise they replace it.
+func (c *Client) Overlay(ctx context.Context, lines []string, appendMode bool, o OverlayOpts) error {
+	body := map[string]any{"lines": lines, "append": appendMode}
+	if o.HasTitle {
+		body["title"] = o.Title
+	}
+	if o.Pos != "" {
+		body["pos"] = o.Pos
+	}
+	if o.MaxLines > 0 {
+		body["max_lines"] = o.MaxLines
+	}
+	if o.Opacity > 0 {
+		body["opacity"] = o.Opacity
+	}
+	if o.Size > 0 {
+		body["size"] = o.Size
+	}
+	if o.Width > 0 {
+		body["width"] = o.Width
+	}
+	return c.do(ctx, http.MethodPost, "/overlay", body, nil)
+}
+
+// OverlayHide removes the panel.
+func (c *Client) OverlayHide(ctx context.Context) error {
+	return c.do(ctx, http.MethodDelete, "/overlay", nil, nil)
+}

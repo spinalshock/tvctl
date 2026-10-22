@@ -32,6 +32,8 @@ import java.io.IOException
  *   POST /intent            {"action","data","package","component"}
  *   POST /play              {"url","title"} native player
  *   POST /toast             {"text"}
+ *   POST /overlay           {"lines":[..]|"text", "append", "title", "pos", "max_lines", "opacity", "size", "width"}
+ *   DELETE /overlay         remove the panel
  *   POST /control           {"action": play|pause|toggle|stop|next|previous|seek|seek_by, "position_ms"}
  *   GET  /shot              PNG screenshot (needs accessibility, API 30+)
  */
@@ -68,6 +70,8 @@ class HttpServer(private val ctx: Context, port: Int, private val now: NowPlayin
             s.method == Method.POST && path == "/intent" -> intent(body(s))
             s.method == Method.POST && path == "/play" -> play(body(s))
             s.method == Method.POST && path == "/toast" -> toast(body(s))
+            s.method == Method.POST && path == "/overlay" -> overlay(body(s))
+            s.method == Method.DELETE && path == "/overlay" -> overlayHide()
             s.method == Method.POST && path == "/control" -> control(body(s))
             s.method == Method.GET && path == "/shot" -> shot()
             else -> json(Response.Status.NOT_FOUND, JSONObject().put("error", "no such route"))
@@ -223,6 +227,35 @@ class HttpServer(private val ctx: Context, port: Int, private val now: NowPlayin
         val long = b.optBoolean("long", false)
         main.post { Toast.makeText(ctx, text, if (long) Toast.LENGTH_LONG else Toast.LENGTH_SHORT).show() }
         return ok(JSONObject().put("ok", true))
+    }
+
+    /** Feed the on-screen text panel. View work belongs to the main thread;
+     *  the request waits for it so a failure (no overlay permission) is
+     *  reported to the caller rather than logged on the TV. */
+    private fun overlay(b: JSONObject): Response {
+        if (!Settings.canDrawOverlays(ctx)) {
+            return json(Response.Status.NOT_IMPLEMENTED, JSONObject().put("error", "overlay permission missing: run tv setup"))
+        }
+        val err = onMain { Overlay.show(ctx, b) }
+        if (err != null) return json(Response.Status.INTERNAL_ERROR, JSONObject().put("error", err))
+        return ok(JSONObject().put("ok", true).put("visible", true))
+    }
+
+    private fun overlayHide(): Response {
+        onMain { Overlay.hide(ctx) }
+        return ok(JSONObject().put("ok", true).put("visible", false))
+    }
+
+    /** Runs f on the main thread and returns its error message, if any. */
+    private fun onMain(f: () -> Unit): String? {
+        val done = java.util.concurrent.CountDownLatch(1)
+        var err: String? = null
+        main.post {
+            try { f() } catch (e: Exception) { err = e.message ?: e.toString() }
+            done.countDown()
+        }
+        done.await(3, java.util.concurrent.TimeUnit.SECONDS)
+        return err
     }
 
     private fun control(b: JSONObject): Response {
