@@ -58,7 +58,7 @@ func Root(env *Env) *cobra.Command {
 	root.AddCommand(
 		e.discover(), e.pair(), e.key(), e.vol(), e.apps(), e.app(),
 		e.text(), e.url(), e.say(), e.sleep(), e.wake(), e.status(), e.devices(),
-		e.setup(), e.now(), e.events(), e.play(), e.toast(), e.shot(), e.watch(), e.overlay(), e.initCmd(),
+		e.setup(), e.now(), e.events(), e.play(), e.toast(), e.shot(), e.watch(), e.overlay(), e.dash(), e.initCmd(),
 		e.yt(), e.netflixSearch(), e.search(),
 		e.pause(), e.resume(), e.toggle(), e.stop(), e.next(), e.prev(), e.seek(),
 	)

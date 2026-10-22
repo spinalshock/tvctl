@@ -322,3 +322,24 @@ func (c *Client) Overlay(ctx context.Context, lines []string, appendMode bool, o
 func (c *Client) OverlayHide(ctx context.Context) error {
 	return c.do(ctx, http.MethodDelete, "/overlay", nil, nil)
 }
+
+// Dash shows a full-screen page: html rendered as sent (base is the URL
+// relative fetches resolve against), or a url the TV loads itself.
+// Returns needsForeground like Play.
+func (c *Client) Dash(ctx context.Context, html, url, base string) (bool, error) {
+	var out struct {
+		NeedsForeground bool `json:"needsForeground"`
+	}
+	err := c.do(ctx, http.MethodPost, "/dash", map[string]any{"html": html, "url": url, "base": base}, &out)
+	return out.NeedsForeground, err
+}
+
+// DashJS runs JavaScript in the open dashboard page.
+func (c *Client) DashJS(ctx context.Context, js string) error {
+	return c.do(ctx, http.MethodPost, "/dash", map[string]any{"js": js}, nil)
+}
+
+// DashClose closes the dashboard page.
+func (c *Client) DashClose(ctx context.Context) error {
+	return c.do(ctx, http.MethodDelete, "/dash", nil, nil)
+}

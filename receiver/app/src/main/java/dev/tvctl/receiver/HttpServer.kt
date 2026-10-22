@@ -34,6 +34,8 @@ import java.io.IOException
  *   POST /toast             {"text"}
  *   POST /overlay           {"lines":[..]|"text", "append", "title", "pos", "max_lines", "opacity", "size", "width"}
  *   DELETE /overlay         remove the panel
+ *   POST /dash              {"html"|"url", "base"} full-screen page; {"js"} runs in the open page
+ *   DELETE /dash            close the page
  *   POST /control           {"action": play|pause|toggle|stop|next|previous|seek|seek_by, "position_ms"}
  *   GET  /shot              PNG screenshot (needs accessibility, API 30+)
  */
@@ -72,6 +74,8 @@ class HttpServer(private val ctx: Context, port: Int, private val now: NowPlayin
             s.method == Method.POST && path == "/toast" -> toast(body(s))
             s.method == Method.POST && path == "/overlay" -> overlay(body(s))
             s.method == Method.DELETE && path == "/overlay" -> overlayHide()
+            s.method == Method.POST && path == "/dash" -> dash(body(s))
+            s.method == Method.DELETE && path == "/dash" -> dashClose()
             s.method == Method.POST && path == "/control" -> control(body(s))
             s.method == Method.GET && path == "/shot" -> shot()
             else -> json(Response.Status.NOT_FOUND, JSONObject().put("error", "no such route"))
@@ -239,6 +243,33 @@ class HttpServer(private val ctx: Context, port: Int, private val now: NowPlayin
         val err = onMain { Overlay.show(ctx, b) }
         if (err != null) return json(Response.Status.INTERNAL_ERROR, JSONObject().put("error", err))
         return ok(JSONObject().put("ok", true).put("visible", true))
+    }
+
+    /** Show a page full screen, or update the one showing. "js" alone
+     *  only makes sense with a page open; without one it is an error so
+     *  a script learns its dashboard is gone. */
+    private fun dash(b: JSONObject): Response {
+        val js = b.optString("js")
+        val html = b.optString("html")
+        val url = b.optString("url")
+        if (html.isEmpty() && url.isEmpty()) {
+            if (js.isEmpty()) return json(Response.Status.BAD_REQUEST, JSONObject().put("error", "html, url or js required"))
+            val a = DashActivity.current
+                ?: return json(Response.Status.NOT_FOUND, JSONObject().put("error", "no dashboard open: send html or url first"))
+            a.eval(js)
+            return ok(JSONObject().put("ok", true))
+        }
+        val i = Intent(ctx, DashActivity::class.java)
+            .putExtra("html", html)
+            .putExtra("url", url)
+            .putExtra("base", b.optString("base"))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        return start(i, JSONObject())
+    }
+
+    private fun dashClose(): Response {
+        DashActivity.close()
+        return ok(JSONObject().put("ok", true))
     }
 
     private fun overlayHide(): Response {
