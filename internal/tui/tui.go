@@ -96,6 +96,7 @@ type model struct {
 
 	dev      device.Device  // stock-API driver, for keyboard polling and typing
 	typing   bool           // TV keyboard is open: Enter sends the line as text
+	asleep   bool           // last keyboard probe found the TV in standby
 	tvText   string         // what the TV's field currently holds
 	pl       *cast.Playlist // local files being served, nil when idle
 	plGrace  int            // now-events to ignore right after starting an item
@@ -118,8 +119,9 @@ type (
 	resyncMsg struct{ now *receiver.Now }
 	// kbMsg is the result of one keyboard-state poll.
 	kbMsg struct {
-		open bool
-		text string
+		open   bool
+		text   string
+		asleep bool // remote service not listening: TV in standby
 	}
 	// chosenMsg carries yazi's selection; execDoneMsg any other external
 	// program's exit.
@@ -174,16 +176,25 @@ func (m *model) Init() tea.Cmd {
 }
 
 // pollKeyboard asks the TV every 1.5 s whether its keyboard is up. It's a
-// tiny local HTTP call, and it's the only way to know in basic mode.
+// tiny local HTTP call, and it's the only way to know in basic mode. The
+// probe is passive (it never wakes the TV), and while the TV is asleep the
+// poll slows to every 10 s so a standby TV isn't pestered.
 func (m *model) pollKeyboard() tea.Cmd {
 	kw, ok := m.dev.(device.KeyboardWatcher)
 	if !ok {
 		return nil
 	}
-	return tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg {
+	every := 1500 * time.Millisecond
+	if m.asleep {
+		every = 10 * time.Second
+	}
+	return tea.Tick(every, func(time.Time) tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		open, cur, err := kw.KeyboardOpen(ctx)
+		if errors.Is(err, firetv.ErrAsleep) {
+			return kbMsg{asleep: true}
+		}
 		if err != nil {
 			return kbMsg{}
 		}
@@ -287,6 +298,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case kbMsg:
+		m.asleep = msg.asleep
 		if msg.open && !m.typing {
 			m.typing = true
 			m.say(styleAccent.Render("⌨ ") + styleText.Render("the TV is asking for text — type it and press Enter (Esc to cancel)"))

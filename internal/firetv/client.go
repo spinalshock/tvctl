@@ -128,11 +128,29 @@ type apiError struct {
 	Description string `json:"description"`
 }
 
+// ErrAsleep is returned by passive calls when the TV's remote service is
+// not listening, which is what a TV in standby looks like from the LAN.
+var ErrAsleep = errors.New("TV is asleep")
+
+type passiveKey struct{}
+
+// Passive marks ctx so calls made with it never kick the remote service.
+// Kicking is a DIAL launch, and Fire TV treats a DIAL launch as a reason
+// to wake up. A user pressing a key may want that; a background poll must
+// never cause it, or a TV switched off with the remote keeps coming back.
+func Passive(ctx context.Context) context.Context {
+	return context.WithValue(ctx, passiveKey{}, true)
+}
+
 // do is the single choke point for authenticated calls. It guarantees the
-// server is up, stamps the three headers, and turns non-2xx into a readable
-// error carrying the TV's own description.
+// server is up (unless the context is Passive), stamps the three headers,
+// and turns non-2xx into a readable error carrying the TV's own description.
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
-	if err := c.ensureServer(ctx); err != nil {
+	if ctx.Value(passiveKey{}) != nil {
+		if !portOpen(net.JoinHostPort(c.Host, fmt.Sprint(apiPort))) {
+			return ErrAsleep
+		}
+	} else if err := c.ensureServer(ctx); err != nil {
 		return err
 	}
 	var rdr io.Reader
@@ -319,9 +337,11 @@ func (c *Client) Wake(ctx context.Context) error {
 	return c.Key(ctx, device.KeyWake)
 }
 
-// KeyboardOpen implements device.KeyboardWatcher.
+// KeyboardOpen implements device.KeyboardWatcher. It is a status probe,
+// polled by the TUI, so it is always passive: it reports ErrAsleep rather
+// than waking the TV to ask.
 func (c *Client) KeyboardOpen(ctx context.Context) (bool, string, error) {
-	k, err := c.KeyboardState(ctx)
+	k, err := c.KeyboardState(Passive(ctx))
 	if err != nil {
 		return false, "", err
 	}
