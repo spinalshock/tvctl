@@ -259,9 +259,13 @@ func loadApps() tea.Cmd {
 			return appsMsg(nil)
 		}
 		c := firetv.New(ent.Host, ent.Name, ent.Token)
+		var rc *receiver.Client
+		if ent.ReceiverToken != "" {
+			rc = receiver.New(ent.Host, ent.ReceiverToken)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		apps, err := c.Apps(ctx)
+		apps, err := cli.AllApps(ctx, c, rc)
 		if err != nil {
 			return appsMsg(nil)
 		}
@@ -618,7 +622,7 @@ func (m *model) help(args []string) {
 	if len(args) == 0 {
 		m.say("")
 		m.say("  " + styleBold.Render("Prompt shortcuts"))
-		m.say("  <app name>        launch it (netflix, yt, or any prefix of an installed app)")
+		m.say("  <app name>        launch it: " + aliasesForHelp() + ", or any prefix of an app's name")
 		m.say("  youtube <words>   play the top YouTube result · netflix <words> searches Netflix")
 		m.say("  search <words>    Fire TV's search across apps (search youtube|netflix <words> for one app)")
 		m.say("  <url>             open it (YouTube links play directly)")
@@ -1107,4 +1111,13 @@ func (m *model) refresh() {
 	}
 	m.view.SetContent(strings.Join(lines, "\n"))
 	m.view.GotoBottom()
+}
+
+func aliasesForHelp() string {
+	names := make([]string, 0, len(cli.Aliases))
+	for a := range cli.Aliases {
+		names = append(names, a)
+	}
+	sort.Strings(names)
+	return strings.Join(names, " · ")
 }

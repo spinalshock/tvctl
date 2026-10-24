@@ -34,6 +34,20 @@ func (e *cmds) openReceiver() (string, device.Device, *config.Store, *receiver.C
 	return id, d, st, receiver.New(ent.Host, ent.ReceiverToken), nil
 }
 
+// optionalReceiver returns a client for the default device's receiver, or
+// nil when none is set up; for verbs that work without one but do better
+// with it (app resolution sees built-in apps).
+func (e *cmds) optionalReceiver(st *config.Store) *receiver.Client {
+	if st == nil {
+		return nil
+	}
+	_, ent, err := st.Resolve(e.env.Device)
+	if err != nil || ent.ReceiverToken == "" {
+		return nil
+	}
+	return receiver.New(ent.Host, ent.ReceiverToken)
+}
+
 // bringForward is the basic-mode fallback: when the receiver parks a
 // request because it can't start activities from the background, launch
 // the receiver app through the TV's own API, which may.

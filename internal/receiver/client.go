@@ -343,3 +343,22 @@ func (c *Client) DashJS(ctx context.Context, js string) error {
 func (c *Client) DashClose(ctx context.Context) error {
 	return c.do(ctx, http.MethodDelete, "/dash", nil, nil)
 }
+
+// App is one launchable app as the receiver sees it. Unlike the TV's own
+// list, this includes built-ins (Prime Video, Appstore, Gallery), because
+// the receiver queries the launcher the way the home screen does.
+type App struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// Apps lists everything the launcher could start.
+func (c *Client) Apps(ctx context.Context) ([]App, error) {
+	var out struct {
+		Apps []App `json:"apps"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/apps", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Apps, nil
+}

@@ -353,11 +353,11 @@ func (e *cmds) apps() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cx, cancel := ctx()
 			defer cancel()
-			_, d, _, err := e.open()
+			_, d, st, err := e.open()
 			if err != nil {
 				return err
 			}
-			apps, err := d.Apps(cx)
+			apps, err := AllApps(cx, d, e.optionalReceiver(st))
 			if err != nil {
 				return err
 			}
@@ -382,21 +382,50 @@ var Aliases = map[string]string{
 	"spotify":    "com.spotify.tv.android",
 	"silk":       "com.amazon.cloud9",
 	"browser":    "com.amazon.cloud9",
-	"prime":      "com.amazon.avod",
+	"prime":      "com.amazon.firebat", // Prime Video's package on Fire TV
+	"primevideo": "com.amazon.firebat",
 	"gfn":        "com.nvidia.tegrazone3",
 	"projectivy": "com.spocky.projengmenu",
 }
 
-// resolveApp turns user input into a package id: explicit package, alias,
-// or unique case-insensitive prefix of an installed app's name.
-func ResolveApp(cx context.Context, d device.Device, s string) (string, error) {
+// AllApps merges the TV's own app list with the receiver's, when one is
+// paired. The TV's API omits built-in apps (Prime Video, Appstore,
+// Gallery); the receiver asks the launcher and sees them all. rc may be
+// nil. A receiver failure is not an error: the TV list still stands.
+func AllApps(cx context.Context, d device.Device, rc *receiver.Client) ([]device.App, error) {
+	apps, err := d.Apps(cx)
+	if err != nil {
+		return nil, err
+	}
+	if rc == nil {
+		return apps, nil
+	}
+	more, err := rc.Apps(cx)
+	if err != nil {
+		return apps, nil
+	}
+	seen := make(map[string]bool, len(apps))
+	for _, a := range apps {
+		seen[a.ID] = true
+	}
+	for _, a := range more {
+		if !seen[a.ID] {
+			apps = append(apps, device.App{ID: a.ID, Name: a.Name, Installed: true})
+		}
+	}
+	return apps, nil
+}
+
+// ResolveApp turns user input into a package id: explicit package, alias,
+// or unique case-insensitive prefix of an app's name (see AllApps).
+func ResolveApp(cx context.Context, d device.Device, rc *receiver.Client, s string) (string, error) {
 	if strings.Contains(s, ".") {
 		return s, nil
 	}
 	if id, ok := Aliases[strings.ToLower(s)]; ok {
 		return id, nil
 	}
-	apps, err := d.Apps(cx)
+	apps, err := AllApps(cx, d, rc)
 	if err != nil {
 		return "", err
 	}
@@ -422,16 +451,17 @@ func ResolveApp(cx context.Context, d device.Device, s string) (string, error) {
 func (e *cmds) app() *cobra.Command {
 	return &cobra.Command{
 		Use:   "app <name|package>",
-		Short: "Launch an app (netflix, youtube, spotify, or a package id)",
+		Short: "Launch an app by alias, name prefix, or package id",
+		Long:  "Aliases: " + aliasList() + ".\nAnything else matches the start of an app's name (see `tv apps`), or is used as a package id when it contains a dot.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cx, cancel := ctx()
 			defer cancel()
-			_, d, _, err := e.open()
+			_, d, st, err := e.open()
 			if err != nil {
 				return err
 			}
-			id, err := ResolveApp(cx, d, args[0])
+			id, err := ResolveApp(cx, d, e.optionalReceiver(st), args[0])
 			if err != nil {
 				return err
 			}
@@ -658,4 +688,14 @@ func (e *cmds) openURL(cx context.Context, d device.Device, link string) error {
 		return err
 	}
 	return o.OpenURL(cx, link)
+}
+
+// aliasList renders Aliases as "netflix, prime, yt, …" for help text.
+func aliasList() string {
+	names := make([]string, 0, len(Aliases))
+	for a := range Aliases {
+		names = append(names, a)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
