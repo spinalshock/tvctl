@@ -7,7 +7,6 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
-import android.widget.Toast
 import fi.iki.elonen.NanoHTTPD
 import fi.iki.elonen.NanoWSD
 import org.json.JSONArray
@@ -229,8 +228,9 @@ class HttpServer(private val ctx: Context, port: Int, private val now: NowPlayin
             return json(Response.Status.BAD_REQUEST, JSONObject().put("error", "text required"))
         }
         val long = b.optBoolean("long", false)
-        main.post { Toast.makeText(ctx, text, if (long) Toast.LENGTH_LONG else Toast.LENGTH_SHORT).show() }
-        return ok(JSONObject().put("ok", true))
+        val err = onMain { ToastCard.show(ctx, text, long) }
+        if (err != null) return json(Response.Status.INTERNAL_ERROR, JSONObject().put("error", err))
+        return ok(JSONObject().put("ok", true).put("overlay", Settings.canDrawOverlays(ctx)))
     }
 
     /** Feed the on-screen text panel. View work belongs to the main thread;
