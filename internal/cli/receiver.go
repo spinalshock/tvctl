@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -181,19 +182,31 @@ directly and the command returns.`,
 
 func (e *cmds) toast() *cobra.Command {
 	var long bool
+	var pos string
 	c := &cobra.Command{
 		Use:   "toast <text>...",
 		Short: "Show a short message on the TV for a few seconds",
-		Args:  cobra.MinimumNArgs(1),
+		Long: `A card over whatever is on screen, video included. Anything can call it:
+a script, a cron job, or any program on the network (POST /toast on the
+receiver, see tv setup). Pipe text in: echo done | tv toast -`,
+		Args: cobra.MinimumNArgs(1),
 		RunE: e.runRC(func(s *session, args []string) error {
 			text := strings.Join(args, " ")
-			if err := s.rc.Toast(s.ctx, text, long); err != nil {
+			if text == "-" {
+				b, err := io.ReadAll(os.Stdin)
+				if err != nil {
+					return err
+				}
+				text = strings.TrimSpace(string(b))
+			}
+			if err := s.rc.Toast(s.ctx, text, long, pos); err != nil {
 				return err
 			}
 			return e.ok("ok", map[string]any{"text": text})
 		}),
 	}
 	c.Flags().BoolVar(&long, "long", false, "keep it on screen longer")
+	c.Flags().StringVar(&pos, "pos", "top-right", "top-right, top-left, bottom-right, bottom-left, top, bottom")
 	return c
 }
 

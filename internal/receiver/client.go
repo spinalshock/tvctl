@@ -179,8 +179,10 @@ func (c *Client) startish(ctx context.Context, path string, body any) (bool, err
 	return res.NeedsForeground, nil
 }
 
-func (c *Client) Toast(ctx context.Context, text string, long bool) error {
-	return c.do(ctx, http.MethodPost, "/toast", map[string]any{"text": text, "long": long}, nil)
+// Toast shows a card for a few seconds. pos is a corner or edge
+// ("top-right" default, "bottom-left", "top", …); "" keeps the default.
+func (c *Client) Toast(ctx context.Context, text string, long bool, pos string) error {
+	return c.do(ctx, http.MethodPost, "/toast", map[string]any{"text": text, "long": long, "pos": pos}, nil)
 }
 
 // Control drives the active media session of whatever app is playing:

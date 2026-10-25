@@ -30,7 +30,7 @@ import java.io.IOException
  *   POST /open              {"url"} VIEW intent -> whichever app claims it
  *   POST /intent            {"action","data","package","component"}
  *   POST /play              {"url","title"} native player
- *   POST /toast             {"text"}
+ *   POST /toast             {"text", "long", "pos": top-right|top-left|bottom-right|bottom-left|top|bottom}
  *   POST /overlay           {"lines":[..]|"text", "append", "title", "pos", "max_lines", "opacity", "size", "width"}
  *   DELETE /overlay         remove the panel
  *   POST /dash              {"html"|"url", "base"} full-screen page; {"js"} runs in the open page
@@ -228,7 +228,8 @@ class HttpServer(private val ctx: Context, port: Int, private val now: NowPlayin
             return json(Response.Status.BAD_REQUEST, JSONObject().put("error", "text required"))
         }
         val long = b.optBoolean("long", false)
-        val err = onMain { ToastCard.show(ctx, text, long) }
+        val pos = b.optString("pos").ifEmpty { "top-right" }
+        val err = onMain { ToastCard.show(ctx, text, long, pos) }
         if (err != null) return json(Response.Status.INTERNAL_ERROR, JSONObject().put("error", err))
         return ok(JSONObject().put("ok", true).put("overlay", Settings.canDrawOverlays(ctx)))
     }

@@ -24,16 +24,31 @@ import android.widget.Toast
 object ToastCard {
     private val main = Handler(Looper.getMainLooper())
     private var view: TextView? = null
+    private var lastPos = "top-right"
+
+    /** "top-right" (default), "top-left", "bottom-right", "bottom-left", "top", "bottom". */
+    private fun gravityFor(pos: String): Int {
+        val v = if (pos.startsWith("bottom")) Gravity.BOTTOM else Gravity.TOP
+        val h = when {
+            pos.endsWith("left") -> Gravity.START
+            pos.endsWith("right") -> Gravity.END
+            else -> Gravity.CENTER_HORIZONTAL
+        }
+        return v or h
+    }
     private val hide = Runnable { remove() }
 
     /** Main thread only. */
-    fun show(ctx: Context, text: String, long: Boolean) {
+    fun show(ctx: Context, text: String, long: Boolean, pos: String = "top-right") {
         if (!Settings.canDrawOverlays(ctx)) {
             Toast.makeText(ctx, text, if (long) Toast.LENGTH_LONG else Toast.LENGTH_SHORT).show()
             return
         }
         val dm = ctx.resources.displayMetrics
         val dp = { v: Int -> (v * dm.density).toInt() }
+        // A position change rebuilds the window; same position reuses it.
+        if (view != null && lastPos != pos) remove()
+        lastPos = pos
         val tv = view ?: TextView(ctx).apply {
             setTextColor(Color.parseColor("#F2F2F2"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
@@ -54,7 +69,7 @@ object ToastCard {
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT
             ).apply {
-                gravity = Gravity.BOTTOM or Gravity.END
+                gravity = gravityFor(pos)
                 x = dp(40); y = dp(40)
             }
             wm(ctx).addView(this, lp)
