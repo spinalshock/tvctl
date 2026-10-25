@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,85 +11,37 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/omAthalye/tvctl/internal/cast"
-	"github.com/omAthalye/tvctl/internal/config"
-	"github.com/omAthalye/tvctl/internal/device"
 	"github.com/omAthalye/tvctl/internal/receiver"
 	"github.com/omAthalye/tvctl/internal/setup"
 )
 
-// Verbs backed by the companion app. Each one opens the receiver client
-// from the device entry; a missing ReceiverToken produces one consistent
-// "run tv setup" message instead of a 403 from the TV.
-
-func (e *cmds) openReceiver() (string, device.Device, *config.Store, *receiver.Client, error) {
-	id, d, st, err := e.open()
-	if err != nil {
-		return "", nil, nil, nil, err
-	}
-	ent := st.Devices[id]
-	if ent.ReceiverToken == "" {
-		return "", nil, nil, nil, errors.New("companion app not set up on this TV: run `tv setup`")
-	}
-	return id, d, st, receiver.New(ent.Host, ent.ReceiverToken), nil
-}
-
-// optionalReceiver returns a client for the default device's receiver, or
-// nil when none is set up; for verbs that work without one but do better
-// with it (app resolution sees built-in apps).
-func (e *cmds) optionalReceiver(st *config.Store) *receiver.Client {
-	if st == nil {
-		return nil
-	}
-	_, ent, err := st.Resolve(e.env.Device)
-	if err != nil || ent.ReceiverToken == "" {
-		return nil
-	}
-	return receiver.New(ent.Host, ent.ReceiverToken)
-}
-
-// bringForward is the basic-mode fallback: when the receiver parks a
-// request because it can't start activities from the background, launch
-// the receiver app through the TV's own API, which may.
-func (e *cmds) bringForward(ctx context.Context, d device.Device, needs bool) error {
-	if !needs {
-		return nil
-	}
-	return d.Launch(ctx, "dev.tvctl.receiver")
-}
+// Verbs backed by the companion app. They use runRC, which produces one
+// consistent "run tv setup" message when the app isn't paired.
 
 func (e *cmds) setup() *cobra.Command {
 	return &cobra.Command{
 		Use:   "setup",
-		Short: "Install the companion app on the TV and unlock now-playing, screenshots and events",
+		Short: "Install the companion app on the TV (now-playing, screenshots, events, overlays)",
 		Long: `Installs the tvctl receiver app on the TV and grants it the permissions
 Fire OS offers no settings screen for. This is the one step that needs ADB
 debugging switched on, temporarily, on the TV; the binary speaks the
 protocol itself, nothing to install here. Safe to re-run; it updates the
 app in place.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cx, cancel := ctx()
-			defer cancel()
-			id, d, st, err := e.open()
-			if err != nil {
-				return err
-			}
-			ent := st.Devices[id]
-			tok, err := setup.Run(cx, ent, setup.Options{
+		RunE: e.run(func(s *session, _ []string) error {
+			tok, err := setup.Run(s.ctx, s.entry, setup.Options{
 				Out:    e.env.Out,
 				Ask:    e.env.Ask,
-				Launch: func(ctx context.Context, pkg string) error { return d.Launch(ctx, pkg) },
+				Launch: func(ctx context.Context, pkg string) error { return s.dev.Launch(ctx, pkg) },
 			})
 			if err != nil {
 				return err
 			}
-			ent.ReceiverToken = tok
-			st.Devices[id] = ent
-			if err := st.Save(); err != nil {
+			s.entry.ReceiverToken = tok
+			if err := s.save(); err != nil {
 				return err
 			}
-			e.emit("", map[string]any{"ok": true, "receiver": true})
-			return nil
-		},
+			return e.ok("", map[string]any{"receiver": true})
+		}),
 	}
 }
 
@@ -98,20 +49,14 @@ func (e *cmds) now() *cobra.Command {
 	return &cobra.Command{
 		Use:   "now",
 		Short: "What the TV is playing",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cx, cancel := ctx()
-			defer cancel()
-			_, _, _, rc, err := e.openReceiver()
-			if err != nil {
-				return err
-			}
-			n, err := rc.Now(cx)
+		RunE: e.runRC(func(s *session, _ []string) error {
+			n, err := s.rc.Now(s.ctx)
 			if err != nil {
 				return err
 			}
 			e.emit(n.Describe(), n)
 			return nil
-		},
+		}),
 	}
 }
 
@@ -121,14 +66,8 @@ func (e *cmds) events() *cobra.Command {
 		Short: "Stream TV events (now-playing, foreground app, keyboard) until Ctrl-C",
 		Long: `Prints one line per event. With --json each line is the receiver's raw
 JSON object, which is the form editors and scripts should consume.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cx, cancel := ctx()
-			defer cancel()
-			_, _, _, rc, err := e.openReceiver()
-			if err != nil {
-				return err
-			}
-			return rc.Events(cx, func(ev receiver.Event) error {
+		RunE: e.runRC(func(s *session, _ []string) error {
+			return s.rc.Events(s.ctx, func(ev receiver.Event) error {
 				if e.env.JSON {
 					fmt.Fprintln(e.env.Out, string(ev.Raw))
 					return nil
@@ -149,7 +88,7 @@ JSON object, which is the form editors and scripts should consume.`,
 				}
 				return nil
 			})
-		},
+		}),
 	}
 }
 
@@ -170,29 +109,22 @@ command runs; several files, or a directory, play in order. Ctrl-C stops
 serving (the TV keeps what it has buffered). A URL is handed to the TV
 directly and the command returns.`,
 		Args: cobra.MinimumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cx, cancel := ctx()
-			defer cancel()
-			_, d, _, rc, err := e.openReceiver()
-			if err != nil {
-				return err
-			}
-			if len(args) == 1 && strings.Contains(args[0], "://") {
-				needs, err := rc.Play(cx, args[0], title)
+		RunE: e.runRC(func(s *session, args []string) error {
+			if len(args) == 1 && isLink(args[0]) {
+				needs, err := s.rc.Play(s.ctx, args[0], title)
 				if err != nil {
 					return err
 				}
-				if err := e.bringForward(cx, d, needs); err != nil {
+				if err := s.bringForward(needs); err != nil {
 					return err
 				}
-				e.emit("playing "+args[0], map[string]any{"ok": true, "url": args[0]})
-				return nil
+				return e.ok("playing "+args[0], map[string]any{"url": args[0]})
 			}
 			files, err := cast.Expand(args)
 			if err != nil {
 				return err
 			}
-			pl, err := cast.Start(cx, rc, d, files)
+			pl, err := cast.Start(s.ctx, s.rc, s.dev, files)
 			if err != nil {
 				return err
 			}
@@ -210,11 +142,11 @@ directly and the command returns.`,
 			grace := 3
 			for {
 				select {
-				case <-cx.Done():
+				case <-s.ctx.Done():
 					return nil
 				case <-time.After(2 * time.Second):
 				}
-				n, err := rc.Now(cx)
+				n, err := s.rc.Now(s.ctx)
 				if err != nil {
 					continue
 				}
@@ -229,21 +161,19 @@ directly and the command returns.`,
 					continue
 				}
 				if n.App != cast.ReceiverPackage {
-					e.emit("stopped", map[string]any{"ok": true, "reason": "left player"})
-					return nil
+					return e.ok("stopped", map[string]any{"reason": "left player"})
 				}
-				more, err := pl.Next(cx)
+				more, err := pl.Next(s.ctx)
 				if err != nil {
 					return err
 				}
 				if !more {
-					e.emit("done", map[string]any{"ok": true, "played": len(files)})
-					return nil
+					return e.ok("done", map[string]any{"played": len(files)})
 				}
 				grace = 3
 				announce()
 			}
-		},
+		}),
 	}
 	c.Flags().StringVar(&title, "title", "", "title to show for a URL")
 	return c
@@ -253,22 +183,15 @@ func (e *cmds) toast() *cobra.Command {
 	var long bool
 	c := &cobra.Command{
 		Use:   "toast <text>...",
-		Short: "Show a short message on the TV",
+		Short: "Show a short message on the TV for a few seconds",
 		Args:  cobra.MinimumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cx, cancel := ctx()
-			defer cancel()
-			_, _, _, rc, err := e.openReceiver()
-			if err != nil {
-				return err
-			}
+		RunE: e.runRC(func(s *session, args []string) error {
 			text := strings.Join(args, " ")
-			if err := rc.Toast(cx, text, long); err != nil {
+			if err := s.rc.Toast(s.ctx, text, long); err != nil {
 				return err
 			}
-			e.emit("ok", map[string]any{"ok": true, "text": text})
-			return nil
-		},
+			return e.ok("ok", map[string]any{"text": text})
+		}),
 	}
 	c.Flags().BoolVar(&long, "long", false, "keep it on screen longer")
 	return c
@@ -279,14 +202,8 @@ func (e *cmds) shot() *cobra.Command {
 		Use:   "shot [file.png]",
 		Short: "Screenshot the TV (DRM video shows black; menus and most apps are fine)",
 		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cx, cancel := ctx()
-			defer cancel()
-			_, _, _, rc, err := e.openReceiver()
-			if err != nil {
-				return err
-			}
-			png, err := rc.Screenshot(cx)
+		RunE: e.runRC(func(s *session, args []string) error {
+			png, err := s.rc.Screenshot(s.ctx)
 			if err != nil {
 				return err
 			}
@@ -301,9 +218,8 @@ func (e *cmds) shot() *cobra.Command {
 			if err := os.WriteFile(path, png, 0o644); err != nil {
 				return err
 			}
-			e.emit(path, map[string]any{"ok": true, "path": path, "bytes": len(png)})
-			return nil
-		},
+			return e.ok(path, map[string]any{"path": path, "bytes": len(png)})
+		}),
 	}
 }
 

@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/receiver"
 )
 
 // Transport verbs. With the companion app they act on the active media
@@ -18,73 +17,55 @@ import (
 // deterministic. Without it they fall back to the TV's media keys, which
 // every app honours but which can only toggle or skip.
 
-func (e *cmds) transport(action string, positionMs int64, fallback device.Key) error {
-	cx, cancel := ctx()
-	defer cancel()
-	id, d, st, err := e.open()
-	if err != nil {
-		return err
-	}
-	ent := st.Devices[id]
-	if ent.ReceiverToken != "" {
-		rc := receiver.New(ent.Host, ent.ReceiverToken)
-		if err := rc.Control(cx, action, positionMs); err == nil {
-			e.emit(action, map[string]any{"ok": true, "action": action, "via": "session"})
-			return nil
-		} else if !strings.Contains(err.Error(), "nothing is playing") {
+func (e *cmds) transport(s *session, action string, positionMs int64, fallback device.Key) error {
+	if s.rc != nil {
+		err := s.rc.Control(s.ctx, action, positionMs)
+		if err == nil {
+			return e.ok(action, map[string]any{"action": action, "via": "session"})
+		}
+		if !strings.Contains(err.Error(), "nothing is playing") {
 			return err
 		}
 	}
 	if fallback == "" {
 		return errors.New("needs the companion app (tv setup) or something playing")
 	}
-	if err := d.Key(cx, fallback); err != nil {
+	if err := s.dev.Key(s.ctx, fallback); err != nil {
 		return err
 	}
-	e.emit(action+" (media key)", map[string]any{"ok": true, "action": action, "via": "key"})
-	return nil
+	return e.ok(action+" (media key)", map[string]any{"action": action, "via": "key"})
+}
+
+// transportCmd is the one shape all the simple transport verbs share.
+func (e *cmds) transportCmd(use, short string, aliases []string, action string, fallback device.Key) *cobra.Command {
+	return &cobra.Command{
+		Use: use, Aliases: aliases, Short: short, Args: cobra.NoArgs,
+		RunE: e.run(func(s *session, _ []string) error { return e.transport(s, action, 0, fallback) }),
+	}
 }
 
 func (e *cmds) pause() *cobra.Command {
-	return &cobra.Command{
-		Use: "pause", Short: "Pause whatever is playing", Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error { return e.transport("pause", 0, device.KeyPlayPause) },
-	}
+	return e.transportCmd("pause", "Pause whatever is playing", nil, "pause", device.KeyPlayPause)
 }
 
 func (e *cmds) resume() *cobra.Command {
-	return &cobra.Command{
-		Use: "resume", Aliases: []string{"unpause"}, Short: "Resume playback", Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error { return e.transport("play", 0, device.KeyPlayPause) },
-	}
+	return e.transportCmd("resume", "Resume playback", []string{"unpause"}, "play", device.KeyPlayPause)
 }
 
 func (e *cmds) toggle() *cobra.Command {
-	return &cobra.Command{
-		Use: "toggle", Aliases: []string{"pp"}, Short: "Play/pause toggle", Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error { return e.transport("toggle", 0, device.KeyPlayPause) },
-	}
+	return e.transportCmd("toggle", "Play/pause toggle", []string{"pp"}, "toggle", device.KeyPlayPause)
 }
 
 func (e *cmds) stop() *cobra.Command {
-	return &cobra.Command{
-		Use: "stop", Short: "Stop playback", Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error { return e.transport("stop", 0, "") },
-	}
+	return e.transportCmd("stop", "Stop playback", nil, "stop", "")
 }
 
 func (e *cmds) next() *cobra.Command {
-	return &cobra.Command{
-		Use: "next", Short: "Next track / episode (fast-forward on the TV without the app)", Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error { return e.transport("next", 0, device.KeyFastFwd) },
-	}
+	return e.transportCmd("next", "Next track / episode (fast-forward without the companion app)", nil, "next", device.KeyFastFwd)
 }
 
 func (e *cmds) prev() *cobra.Command {
-	return &cobra.Command{
-		Use: "prev", Aliases: []string{"previous"}, Short: "Previous track (rewind on the TV without the app)", Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error { return e.transport("previous", 0, device.KeyRewind) },
-	}
+	return e.transportCmd("prev", "Previous track (rewind without the companion app)", []string{"previous"}, "previous", device.KeyRewind)
 }
 
 var reClock = regexp.MustCompile(`^(?:(\d+):)?(\d{1,2}):(\d{2})$`)
@@ -137,10 +118,11 @@ func (e *cmds) seek() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			action := "seek"
 			if rel {
-				return e.transport("seek_by", ms, "")
+				action = "seek_by"
 			}
-			return e.transport("seek", ms, "")
+			return e.run(func(s *session, _ []string) error { return e.transport(s, action, ms, "") })(cmd, nil)
 		},
 	}
 }

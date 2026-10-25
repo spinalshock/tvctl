@@ -7,16 +7,22 @@ import (
 	"github.com/omAthalye/tvctl/internal/cli"
 )
 
-// TestResolve pins the precedence rule: verb, then URL, then app.
+// TestResolve pins the precedence rule: built-in, alias (bare opens, with
+// words searches unless a verb owns the word), verb, link, app.
 func TestResolve(t *testing.T) {
 	m := &model{verbs: cli.Verbs()}
 	cases := map[string][]string{
 		"vol up 3":              {"vol", "up", "3"},
-		"netflix":               {"app", "netflix"},
-		"https://youtu.be/x":    {"url", "https://youtu.be/x"},
-		"youtube.com/watch?v=x": {"url", "youtube.com/watch?v=x"},
+		"netflix":               {"open", "netflix"},
+		"netflix dark":          {"search", "netflix", "dark"},
+		"prime the boys":        {"search", "prime", "the", "boys"},
+		"youtube lofi beats":    {"youtube", "lofi", "beats"},
+		"YouTube lofi":          {"youtube", "lofi"},
+		"https://youtu.be/x":    {"open", "https://youtu.be/x"},
+		"youtube.com/watch?v=x": {"open", "youtube.com/watch?v=x"},
 		"say switch to hdmi 1":  {"say", "switch", "to", "hdmi", "1"},
-		"Sony LIV":              {"app", "Sony LIV"},
+		"Sony LIV":              {"open", "Sony LIV"},
+		"app netflix":           {"app", "netflix"},
 	}
 	for in, want := range cases {
 		got, local := m.resolve(in)

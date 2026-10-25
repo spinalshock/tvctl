@@ -30,21 +30,15 @@ func (e *cmds) dash() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "dash [clock|<file.html>|<url>|js <code>|off]",
 		Short: "Show a full-screen page on the TV (clock by default)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cx, cancel := ctx()
-			defer cancel()
-			_, d, _, rc, err := e.openReceiver()
-			if err != nil {
-				return err
-			}
+		RunE: e.runRC(func(s *session, args []string) error {
+			cx, rc := s.ctx, s.rc
 			if len(args) >= 1 {
 				switch args[0] {
 				case "off", "close":
 					if err := rc.DashClose(cx); err != nil {
 						return err
 					}
-					e.emit("dashboard closed", map[string]any{"open": false})
-					return nil
+					return e.ok("dashboard closed", map[string]any{"open": false})
 				case "js":
 					if len(args) < 2 {
 						return errors.New("dash js: give the code to run")
@@ -52,8 +46,7 @@ func (e *cmds) dash() *cobra.Command {
 					if err := rc.DashJS(cx, strings.Join(args[1:], " ")); err != nil {
 						return err
 					}
-					e.emit("ok", map[string]any{"ok": true})
-					return nil
+					return e.ok("ok", nil)
 				}
 			}
 
@@ -61,7 +54,7 @@ func (e *cmds) dash() *cobra.Command {
 			var file string
 			html, url := clockHTML, ""
 			if len(args) >= 1 && args[0] != "clock" {
-				if strings.Contains(args[0], "://") {
+				if isLink(args[0]) {
 					html, url = "", args[0]
 				} else {
 					file = args[0]
@@ -77,7 +70,7 @@ func (e *cmds) dash() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return e.bringForward(cx, d, needs)
+				return s.bringForward(needs)
 			}
 			if err := push(); err != nil {
 				return err
@@ -116,7 +109,7 @@ func (e *cmds) dash() *cobra.Command {
 					return err
 				}
 			}
-		},
+		}),
 	}
 	c.Flags().StringVar(&base, "base", "", "base URL for relative links in pushed HTML (e.g. http://<this machine>:8787/)")
 	c.Flags().BoolVar(&watch, "watch", false, "keep running and re-push the file when it changes")

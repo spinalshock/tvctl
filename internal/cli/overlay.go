@@ -36,9 +36,9 @@ func (f *overlayFlags) bind(c *cobra.Command) {
 	c.Flags().Float64Var(&f.width, "width", 0.45, "fraction of the screen for left/right panels")
 }
 
-func (f *overlayFlags) opts(c *cobra.Command) receiver.OverlayOpts {
+func (f *overlayFlags) opts(titleSet bool) receiver.OverlayOpts {
 	return receiver.OverlayOpts{
-		Title: f.title, HasTitle: c.Flags().Changed("title") || f.title != "",
+		Title: f.title, HasTitle: titleSet || f.title != "",
 		Pos: f.pos, MaxLines: f.lines, Opacity: f.opacity, Size: f.size, Width: f.width,
 	}
 }
@@ -59,13 +59,23 @@ func (e *cmds) watch() *cobra.Command {
 		Use:   "watch [flags] [-- command [args...]]",
 		Short: "Mirror a command's output (or stdin) onto the TV",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cx, cancel := ctx()
-			defer cancel()
-			_, _, _, rc, err := e.openReceiver()
-			if err != nil {
-				return err
-			}
+			titleSet := cmd.Flags().Changed("title")
+			return e.runRC(func(s *session, args []string) error {
+				return e.watchRun(s, args, &f, titleSet, keep)
+			})(cmd, args)
+		},
+	}
+	f.bind(c)
+	c.Flags().BoolVar(&keep, "keep", false, "leave the panel on screen after the stream ends")
+	// Flags stop at the first positional, so `tv watch go test -v` needs no --.
+	c.Flags().SetInterspersed(false)
+	return c
+}
 
+func (e *cmds) watchRun(s *session, args []string, f *overlayFlags, titleSet, keep bool) error {
+	cx, rc := s.ctx, s.rc
+	{
+		{
 			// Source: the child's combined output, or our stdin.
 			var src io.Reader
 			var child *exec.Cmd
@@ -92,7 +102,7 @@ func (e *cmds) watch() *cobra.Command {
 			if title == "" && child != nil {
 				title = strings.Join(args, " ")
 			}
-			o := f.opts(cmd)
+			o := f.opts(titleSet)
 			o.Title, o.HasTitle = title, true
 			if err := rc.Overlay(cx, nil, false, o); err != nil {
 				return err
@@ -159,13 +169,8 @@ func (e *cmds) watch() *cobra.Command {
 					}
 				}
 			}
-		},
+		}
 	}
-	f.bind(c)
-	c.Flags().BoolVar(&keep, "keep", false, "leave the panel on screen after the stream ends")
-	// Flags stop at the first positional, so `tv watch go test -v` needs no --.
-	c.Flags().SetInterspersed(false)
-	return c
 }
 
 // exitError carries a child's exit status through cobra to main.
@@ -185,29 +190,23 @@ func (e *cmds) overlay() *cobra.Command {
 		Short: "Pin text on the TV screen (overlay off removes it)",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cx, cancel := ctx()
-			defer cancel()
-			_, _, _, rc, err := e.openReceiver()
-			if err != nil {
-				return err
-			}
-			if len(args) == 1 && (args[0] == "off" || args[0] == "hide") {
-				if err := rc.OverlayHide(cx); err != nil {
+			titleSet, linesSet := cmd.Flags().Changed("title"), cmd.Flags().Changed("lines")
+			return e.runRC(func(s *session, args []string) error {
+				if len(args) == 1 && (args[0] == "off" || args[0] == "hide") {
+					if err := s.rc.OverlayHide(s.ctx); err != nil {
+						return err
+					}
+					return e.ok("overlay removed", map[string]any{"visible": false})
+				}
+				lines := strings.Split(strings.Join(args, " "), "\n")
+				if !linesSet {
+					f.lines = len(lines)
+				}
+				if err := s.rc.Overlay(s.ctx, lines, false, f.opts(titleSet)); err != nil {
 					return err
 				}
-				e.emit("overlay removed", map[string]any{"visible": false})
-				return nil
-			}
-			text := strings.Join(args, " ")
-			lines := strings.Split(text, "\n")
-			if !cmd.Flags().Changed("lines") {
-				f.lines = len(lines)
-			}
-			if err := rc.Overlay(cx, lines, false, f.opts(cmd)); err != nil {
-				return err
-			}
-			e.emit("ok", map[string]any{"visible": true, "lines": len(lines)})
-			return nil
+				return e.ok("ok", map[string]any{"visible": true, "lines": len(lines)})
+			})(cmd, args)
 		},
 	}
 	f.bind(c)

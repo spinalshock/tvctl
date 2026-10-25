@@ -94,13 +94,14 @@ type model struct {
 	keyboard string // package asking for text, "" when none
 	events   chan receiver.Event
 
-	dev      device.Device  // stock-API driver, for keyboard polling and typing
-	typing   bool           // TV keyboard is open: Enter sends the line as text
-	asleep   bool           // last keyboard probe found the TV in standby
-	tvText   string         // what the TV's field currently holds
-	pl       *cast.Playlist // local files being served, nil when idle
-	plGrace  int            // now-events to ignore right after starting an item
-	lastShot string         // path of the last screenshot, for `view`
+	dev       device.Device   // stock-API driver, for keyboard polling and typing
+	typing    bool            // TV keyboard is open: Enter sends the line as text
+	asleep    bool            // last keyboard probe found the TV in standby
+	verbWords map[string]bool // verb names and aliases, built on first use
+	tvText    string          // what the TV's field currently holds
+	pl        *cast.Playlist  // local files being served, nil when idle
+	plGrace   int             // now-events to ignore right after starting an item
+	lastShot  string          // path of the last screenshot, for `view`
 }
 
 // Messages from background work.
@@ -534,6 +535,19 @@ func noAsk(prompt string) (string, error) {
 	return "", errors.New(prompt + ": run this one as `tv pair` in a terminal")
 }
 
+// builtins are the prompt-only words the TUI handles itself; everything
+// else is a CLI verb. Resolver, command check and completion all read this.
+var builtins = []string{"help", "keys", "files", "view", "clear", "quit", "exit"}
+
+func isBuiltin(word string) bool {
+	for _, b := range builtins {
+		if word == b {
+			return true
+		}
+	}
+	return false
+}
+
 var urlish = regexp.MustCompile(`^(https?://|www\.|[a-z0-9-]+(\.[a-z0-9-]+)+(/|$))`)
 
 // resolve implements the agreed precedence: built-in word, verb, URL, app.
@@ -574,39 +588,47 @@ func (m *model) resolve(line string) (argv []string, local func() tea.Cmd) {
 	case "view":
 		return nil, func() tea.Cmd { return m.viewShot() }
 	}
-	// A bare app word launches the app even when a verb of the same name
-	// exists for searching ("netflix" launches, "netflix dark" searches).
-	if _, isAlias := cli.Aliases[head]; isAlias && len(fields) == 1 {
-		return []string{"app", head}, nil
-	}
-	for _, v := range m.verbs {
-		if head == v {
-			fields[0] = head // verbs are lowercase; accept "YouTube foo"
-			return fields, nil
+	// An app alias alone launches the app; with words after it, it is a
+	// search inside that app ("netflix" opens Netflix, "netflix dark"
+	// searches it). A verb of the same name wins over the search shortcut,
+	// which is how "youtube <words>" plays the top result instead.
+	if _, isAlias := cli.Aliases[head]; isAlias {
+		if len(fields) == 1 {
+			return []string{"open", head}, nil
+		}
+		if !m.isVerb(head) {
+			return append([]string{"search", head}, fields[1:]...), nil
 		}
 	}
-	if urlish.MatchString(strings.ToLower(fields[0])) {
-		return []string{"url", fields[0]}, nil
+	if m.isVerb(head) {
+		fields[0] = head // verbs are lowercase; accept "YouTube foo"
+		return fields, nil
 	}
-	// Anything else is an app name; ResolveApp handles aliases and
-	// prefixes and produces the "did you mean" error.
-	return []string{"app", line}, nil
+	if urlish.MatchString(strings.ToLower(fields[0])) {
+		return []string{"open", fields[0]}, nil
+	}
+	// Anything else is an app name; open resolves prefixes and produces
+	// the "did you mean" error.
+	return []string{"open", line}, nil
+}
+
+// isVerb accepts verb names and their aliases ("app", "yt", "pp"), while
+// completion (m.verbs) offers only the canonical names.
+func (m *model) isVerb(word string) bool {
+	if m.verbWords == nil {
+		m.verbWords = map[string]bool{}
+		for _, v := range cli.VerbWords() {
+			m.verbWords[v] = true
+		}
+	}
+	return m.verbWords[word]
 }
 
 // isCommand reports whether the first word is a verb or built-in, so that
 // `vol up` still works while the TV's keyboard is open.
 func (m *model) isCommand(line string) bool {
 	head := strings.ToLower(strings.Fields(line)[0])
-	switch head {
-	case "quit", "exit", "clear", "keys", "help", "files", "next", "stop", "shot", "view", "text", "play":
-		return true
-	}
-	for _, v := range m.verbs {
-		if head == v {
-			return true
-		}
-	}
-	return false
+	return isBuiltin(head) || m.isVerb(head)
 }
 
 // help renders cobra's own help for the root or one verb into the
@@ -622,10 +644,9 @@ func (m *model) help(args []string) {
 	if len(args) == 0 {
 		m.say("")
 		m.say("  " + styleBold.Render("Prompt shortcuts"))
-		m.say("  <app name>        launch it: " + aliasesForHelp() + ", or any prefix of an app's name")
-		m.say("  youtube <words>   play the top YouTube result · netflix <words> searches Netflix")
-		m.say("  search <words>    Fire TV's search across apps (search youtube|netflix <words> for one app)")
-		m.say("  <url>             open it (YouTube links play directly)")
+		m.say("  <app>             open it: " + strings.Join(cli.AliasNames(), " · ") + ", or any prefix of an app's name")
+		m.say("  <app> <words>     search inside that app (netflix dark); youtube <words> plays the top result")
+		m.say("  <link>            open it (YouTube links play directly)")
 		m.say("  keys              remote mode: arrow keys go to the TV until esc")
 		m.say("  files             pick files or a folder in yazi, play them on the TV in order")
 		m.say("  pause · resume · toggle · stop · next · prev · seek +30   media controls for any app")
@@ -815,10 +836,8 @@ func (m *model) complete() {
 	switch {
 	case typingFirst:
 		cands = append(cands, m.verbs...)
-		cands = append(cands, "help", "keys", "clear", "quit", "files", "next", "stop", "shot", "view")
-		for a := range cli.Aliases {
-			cands = append(cands, a)
-		}
+		cands = append(cands, builtins...)
+		cands = append(cands, cli.AliasNames()...)
 		for _, a := range m.apps {
 			cands = append(cands, a.Name)
 		}
@@ -1111,13 +1130,4 @@ func (m *model) refresh() {
 	}
 	m.view.SetContent(strings.Join(lines, "\n"))
 	m.view.GotoBottom()
-}
-
-func aliasesForHelp() string {
-	names := make([]string, 0, len(cli.Aliases))
-	for a := range cli.Aliases {
-		names = append(names, a)
-	}
-	sort.Strings(names)
-	return strings.Join(names, " · ")
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -93,3 +94,6 @@ end
 command %[3]s completion fish 2>/dev/null | source
 complete -c %[4]s -w %[3]s
 `
+
+// execLookPath is swapped in tests.
+var execLookPath = exec.LookPath
