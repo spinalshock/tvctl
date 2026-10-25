@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/omAthalye/tvctl/internal/cli"
+	"github.com/omAthalye/tvctl/internal/receiver"
 )
 
 // TestResolve pins the precedence rule: built-in, alias (bare opens, with
@@ -50,5 +51,30 @@ func TestFuzzy(t *testing.T) {
 	}
 	if got := fuzzyRank("zzz", c, 6); len(got) != 0 {
 		t.Errorf("zzz matched %v", got)
+	}
+}
+
+// TestNowBar checks the progress bar draws from the extrapolated position
+// and that an unknown duration falls back to the dashed "elapsed" line.
+func TestNowBar(t *testing.T) {
+	title := "Taambdi Chaamdi"
+	src := "session"
+	n := newNowBar(true)
+	n.set(&receiver.Now{App: "com.amazon.firetv.youtube", Source: &src, Title: &title,
+		State: "playing", Speed: 1, PositionMs: 60_000, DurationMs: 240_000})
+	v := n.View(80)
+	if !strings.Contains(v, "YouTube") || !strings.Contains(v, title) {
+		t.Fatalf("missing app/title: %q", v)
+	}
+	if !strings.Contains(v, "1:00 / 4:00") {
+		t.Errorf("clock: %q", v)
+	}
+	if !strings.Contains(v, "█") {
+		t.Errorf("no bar drawn: %q", v)
+	}
+	n.set(&receiver.Now{App: "com.netflix.ninja", Source: &src, State: "playing", Speed: 1, PositionMs: 5_000})
+	v = n.View(80)
+	if !strings.Contains(v, "elapsed") || !strings.Contains(v, "╌") || !strings.Contains(v, "no title") {
+		t.Errorf("unknown duration: %q", v)
 	}
 }
