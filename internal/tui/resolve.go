@@ -41,7 +41,11 @@ func (m *model) resolve(line string) (argv []string, local func() tea.Cmd) {
 	case "clear":
 		return nil, func() tea.Cmd { m.console.clear(); return nil }
 	case "keys":
-		return nil, func() tea.Cmd { m.mode = modeKeys; return nil }
+		return nil, func() tea.Cmd {
+			m.mode = modeKeys
+			m.console.say(styleDim.Render("  keys mode: your arrow keys drive the TV · esc or q to leave"))
+			return nil
+		}
 	case "help":
 		return nil, func() tea.Cmd { m.help(fields[1:]); return nil }
 	case "files":
