@@ -253,23 +253,30 @@ class HttpServer(private val ctx: Context, port: Int, private val now: NowPlayin
         val js = b.optString("js")
         val html = b.optString("html")
         val url = b.optString("url")
+        val i = Intent(ctx, DashActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         if (html.isEmpty() && url.isEmpty()) {
             if (js.isEmpty()) return json(Response.Status.BAD_REQUEST, JSONObject().put("error", "html, url or js required"))
-            val a = DashActivity.current
-                ?: return json(Response.Status.NOT_FOUND, JSONObject().put("error", "no dashboard open: send html or url first"))
-            a.eval(js)
+            if (!UiLink.dashOpen) return json(Response.Status.NOT_FOUND, JSONObject().put("error", "no dashboard open: send html or url first"))
+            // The activity is singleTask in another process: this intent
+            // lands in its onNewIntent and runs the script there.
+            main.post { ctx.startActivity(i.putExtra("js", js)) }
             return ok(JSONObject().put("ok", true))
         }
-        val i = Intent(ctx, DashActivity::class.java)
-            .putExtra("html", html)
+        i.putExtra("html", html)
             .putExtra("url", url)
             .putExtra("base", b.optString("base"))
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            .putExtra("token", prefs.token)
         return start(i, JSONObject())
     }
 
     private fun dashClose(): Response {
-        DashActivity.close()
+        if (UiLink.dashOpen) {
+            val i = Intent(ctx, DashActivity::class.java)
+                .putExtra("close", true)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            main.post { ctx.startActivity(i) }
+        }
         return ok(JSONObject().put("ok", true))
     }
 

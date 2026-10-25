@@ -19,7 +19,8 @@ import org.json.JSONObject
  * hardware codecs; the PlayerView gives transport controls that the remote
  * drives. A Media3 MediaSession makes this playback visible to the system
  * (and so to NowPlaying) exactly like Netflix's; we also report directly
- * so now-playing works even before `tv setup`.
+ * over UiLink so now-playing works even before `tv setup`. Runs in the
+ * ":ui" process (see UiLink).
  */
 class PlayerActivity : AppCompatActivity() {
     private lateinit var player: ExoPlayer
@@ -75,7 +76,7 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun report() {
         val md = player.mediaMetadata
-        HttpServerHolder.now?.local = JSONObject()
+        val state = JSONObject()
             .put("app", packageName)
             .put("title", md.title?.toString() ?: JSONObject.NULL)
             .put("state", when {
@@ -88,6 +89,7 @@ class PlayerActivity : AppCompatActivity() {
             .put("duration_ms", player.duration.coerceAtLeast(0))
             .put("speed", if (player.isPlaying) 1.0 else 0.0)
             .put("updated_ms", System.currentTimeMillis())
+        UiLink.send(this, UiLink.ACTION_LOCAL_NOW) { putExtra("json", state.toString()) }
     }
 
     /** Media keys on the Fire TV remote arrive as key events. */
@@ -114,7 +116,7 @@ class PlayerActivity : AppCompatActivity() {
     override fun onDestroy() {
         session?.release()
         player.release()
-        HttpServerHolder.now?.local = null
+        UiLink.send(this, UiLink.ACTION_LOCAL_NOW) // no json: clears
         super.onDestroy()
     }
 }

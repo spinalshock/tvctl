@@ -34,6 +34,7 @@ class ReceiverService : Service() {
 
         nowPlaying = NowPlaying(this, App.instance.events).also { it.start() }
         HttpServerHolder.now = nowPlaying
+        UiLink.listen(this, nowPlaying!!)
         server = HttpServer(this, App.PORT, nowPlaying!!).also {
             try {
                 // Timeout 0: WebSocket clients sit idle between events and

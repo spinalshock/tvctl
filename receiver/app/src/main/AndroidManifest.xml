@@ -47,10 +47,12 @@
 
         <!-- Full-screen page pushed from the computer (tv dash). -->
         <activity android:name=".DashActivity" android:exported="false"
+            android:process=":ui"
             android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
         <activity android:name=".PlayerActivity" android:exported="false"
+            android:process=":ui"
             android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 

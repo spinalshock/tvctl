@@ -20,7 +20,11 @@ import androidx.appcompat.app.AppCompatActivity
  *
  * Pages can call `tvctl.now()` for the TV's now-playing document as JSON,
  * which is how the built-in clock shows what is playing without needing
- * the pairing token.
+ * the pairing token in the page.
+ *
+ * Runs in the ":ui" process (see UiLink). The service reaches it only
+ * through intents: a new page, "js" to run in the open page, or "close".
+ * It reports open/closed back with a broadcast.
  */
 class DashActivity : AppCompatActivity() {
     private lateinit var web: WebView
@@ -44,9 +48,12 @@ class DashActivity : AppCompatActivity() {
             addJavascriptInterface(Bridge(), "tvctl")
         }
         setContentView(web)
-        current = this
+        token = intent.getStringExtra("token").orEmpty()
         load(intent)
+        UiLink.send(this, UiLink.ACTION_DASH_STATE) { putExtra("open", true) }
     }
+
+    private var token = ""
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -55,6 +62,15 @@ class DashActivity : AppCompatActivity() {
     }
 
     private fun load(i: Intent) {
+        if (i.getBooleanExtra("close", false)) {
+            finish()
+            return
+        }
+        i.getStringExtra("js")?.let { js ->
+            web.evaluateJavascript(js, null)
+            return
+        }
+        i.getStringExtra("token")?.let { token = it }
         val html = i.getStringExtra("html")
         val url = i.getStringExtra("url")
         when {
@@ -66,10 +82,6 @@ class DashActivity : AppCompatActivity() {
         }
     }
 
-    /** Runs JavaScript in the current page; how the computer updates a
-     *  dashboard in place instead of reloading it. */
-    fun eval(js: String) = runOnUiThread { web.evaluateJavascript(js, null) }
-
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (keyCode == KeyEvent.KEYCODE_BACK) {
             finish()
@@ -79,21 +91,20 @@ class DashActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        if (current === this) current = null
+        UiLink.send(this, UiLink.ACTION_DASH_STATE) { putExtra("open", false) }
         web.destroy()
         super.onDestroy()
     }
 
+    /** JavaScript bridge. Methods run on a WebView worker thread, so the
+     *  local HTTP call to the service is allowed here. */
     private inner class Bridge {
         @JavascriptInterface
-        fun now(): String = HttpServerHolder.now?.snapshot()?.toString() ?: "{}"
-    }
-
-    companion object {
-        @Volatile var current: DashActivity? = null
-
-        fun close() {
-            current?.let { a -> a.runOnUiThread { a.finish() } }
-        }
+        fun now(): String = runCatching {
+            val c = java.net.URL("http://127.0.0.1:${App.PORT}/now").openConnection() as java.net.HttpURLConnection
+            c.connectTimeout = 1000; c.readTimeout = 1500
+            c.setRequestProperty("X-Token", token)
+            c.inputStream.bufferedReader().use { it.readText() }
+        }.getOrDefault("{}")
     }
 }
