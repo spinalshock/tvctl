@@ -13,15 +13,16 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Three things Android only hands to an accessibility service:
+ * What Android only hands to an accessibility service:
  *
  *  - which package is in front (window state changes),
  *  - when the TV wants text: a system keyboard window appearing, or an
- *    editable view taking focus (apps like YouTube draw their own keyboard),
+ *    editable view taking focus (published as "keyboard" events),
+ *  - what the TV's focused text field holds (InputSession, read-only,
+ *    only when tvctl asks),
  *  - screenshots, on Android 11+.
  *
- * It reports into the running service's NowPlaying and the event bus; it
- * never reads screen content (canRetrieveWindowContent is off).
+ * It reports into the running service's NowPlaying and the event bus.
  */
 class TvctlAccessibilityService : AccessibilityService() {
     private var keyboardOpen = false
@@ -78,6 +79,9 @@ class TvctlAccessibilityService : AccessibilityService() {
 
     companion object {
         @Volatile private var instance: TvctlAccessibilityService? = null
+
+        /** The running service, or null when accessibility isn't enabled. */
+        fun get(): TvctlAccessibilityService? = instance
 
         /** PNG of the default display, or null if unavailable. Blocks up to
          *  timeoutMs; DRM-protected content comes back black by design. */

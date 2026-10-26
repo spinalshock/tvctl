@@ -77,6 +77,7 @@ class HttpServer(private val ctx: Context, port: Int, private val now: NowPlayin
             s.method == Method.DELETE && path == "/dash" -> dashClose()
             s.method == Method.POST && path == "/control" -> control(body(s))
             s.method == Method.GET && path == "/shot" -> shot()
+            s.method == Method.GET && path == "/input" -> inputGet()
             else -> json(Response.Status.NOT_FOUND, JSONObject().put("error", "no such route"))
         }
     }
@@ -303,6 +304,15 @@ class HttpServer(private val ctx: Context, port: Int, private val now: NowPlayin
         if (!ok) return json(Response.Status.NOT_FOUND, JSONObject().put("error", "nothing is playing to control (or unknown action \"$action\")"))
         return ok(JSONObject().put("ok", true).put("action", action))
     }
+
+    /** What the TV's focused text field holds (see InputSession). Read-only. */
+    private fun inputGet(): Response {
+        val svc = TvctlAccessibilityService.get() ?: return noA11y()
+        return ok(InputSession.snapshot(svc))
+    }
+
+    private fun noA11y() = json(Response.Status.SERVICE_UNAVAILABLE,
+        JSONObject().put("error", "the receiver's accessibility service isn't running: run tv setup"))
 
     private fun shot(): Response {
         val png = TvctlAccessibilityService.screenshotPng(5000)

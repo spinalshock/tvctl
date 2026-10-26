@@ -93,9 +93,9 @@ type model struct {
 	events chan receiver.Event
 	ticks  int
 
-	typing bool   // TV keyboard is open: Enter sends the line as text
-	asleep bool   // last keyboard probe found the TV in standby
-	tvText string // what the TV's field currently holds
+	typing bool        // the TV wants text: the prompt mirrors its field (typing.go)
+	asleep bool        // last keyboard probe found the TV in standby
+	t      typingState // typing mode's state (typing.go)
 }
 
 // Messages from background work.
@@ -116,6 +116,7 @@ type (
 		open   bool
 		text   string
 		asleep bool // remote service not listening: TV in standby
+		err    bool // the probe failed; not evidence the field closed
 	}
 )
 
@@ -152,7 +153,7 @@ func newModel() (*model, error) {
 func (m *model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink, loadApps(), tick(), m.pollKeyboard()}
 	if m.rc != nil {
-		cmds = append(cmds, m.connectEvents(), m.waitEvent())
+		cmds = append(cmds, m.connectEvents(), m.waitEvent(), m.fetchInput())
 	}
 	return tea.Batch(cmds...)
 }
@@ -180,7 +181,7 @@ func (m *model) pollKeyboard() tea.Cmd {
 			return kbMsg{asleep: true}
 		}
 		if err != nil {
-			return kbMsg{}
+			return kbMsg{err: true}
 		}
 		return kbMsg{open: open, text: cur}
 	})
@@ -293,6 +294,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Type == tea.KeyCtrlC {
 			return m, tea.Quit
 		}
+		// A TV text field takes over from any mode (keys mode included) and
+		// hands control back when it closes.
+		if m.typing {
+			return m, m.typingKey(msg)
+		}
 		if m.mode == modeKeys {
 			k, leave := remoteMap.match(msg)
 			if leave {
@@ -304,20 +310,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if msg.Type == tea.KeyEsc && m.typing {
-			m.typing = false
-			m.console.say(styleDim.Render("  typing mode off (the TV's keyboard is still open)"))
-		}
 		cmd := m.console.Update(msg)
 		m.layout()
 		return m, cmd
 
 	case submitMsg:
-		if m.typing && !m.isCommand(msg.line) {
-			// The TV has a text field open: send the line as typed.
-			return m, m.dispatch("text " + msg.line)
-		}
 		return m, m.dispatch(msg.line)
+
+	case inputMsg, textSentMsg, leaveCheckMsg, typingErrMsg:
+		return m, m.updateTyping(msg)
 
 	case resultMsg:
 		if msg.cmd == "shot" && msg.err == nil {
@@ -345,31 +346,23 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case kbMsg:
 		m.asleep = msg.asleep
-		if msg.open && !m.typing {
-			m.typing = true
-			m.console.say(styleAccent.Render("⌨ ") + styleText.Render("the TV is asking for text — type it and press Enter (Esc to cancel)"))
-		} else if !msg.open && m.typing {
-			m.typing = false
+		m.onPoll(msg)
+		// While the TV has a keyboard up, also read what the field holds
+		// (the companion app answers only when asked).
+		var read tea.Cmd
+		if msg.open || m.typing {
+			read = m.fetchInput()
 		}
-		m.tvText = msg.text
-		return m, m.pollKeyboard()
+		return m, tea.Batch(m.pollKeyboard(), read)
 
 	case eventMsg:
 		switch msg.Type {
 		case "_offline":
 			m.now.offline()
+			m.t.live = false // fall back to the keyboard poll until the app is back
 		case "now":
 			m.now.set(msg.Now)
 			m.player.observe(msg.Now)
-		case "keyboard":
-			m.now.online()
-			if msg.Open != nil && *msg.Open {
-				pkg := ""
-				if msg.Package != nil {
-					pkg = *msg.Package
-				}
-				m.console.say(styleDim.Render("⌨ TV wants text (" + pkg + "): type  text <your words>"))
-			}
 		default:
 			m.now.online()
 		}
@@ -414,8 +407,19 @@ var (
 	styleBarOff = lipgloss.NewStyle().Foreground(rule)
 )
 
-// Frame rows outside the console: header, rule, now (2), rule, rule, footer.
-const frameRows = 7
+// Rows the frame uses outside the console: header, a rule on each side of the
+// context block, a rule above the footer, and the footer — five fixed rows,
+// plus the context block itself (now-bar = 2, typing panel = typingPanelRows).
+const fixedFrameRows = 5
+
+func (m *model) contextRows() int {
+	if m.typing {
+		return typingPanelRows
+	}
+	return 2
+}
+
+func (m *model) frameRows() int { return fixedFrameRows + m.contextRows() }
 
 func (m *model) View() string {
 	if m.width == 0 {
@@ -442,24 +446,30 @@ func (m *model) View() string {
 		footer = m.console.status()
 	case m.player.active():
 		footer = m.player.status()
+	case m.typing:
+		footer = m.typingFooter()
 	case m.mode == modeKeys:
 		m.footer.Width = m.width - 5
 		footer = styleAccent.Render("KEYS ") + m.footer.View(remoteMap)
 		m.footer.Width = m.width
-	case m.typing:
-		footer = styleAccent.Render("TYPING ") + styleDim.Render("Enter sends to the TV · Esc leaves · commands still work")
 	default:
 		footer = m.footer.View(promptMap)
 	}
 
+	// While a TV field is focused, a highlighted panel takes the now-bar's
+	// place to make the prompt unmistakable.
+	context := m.now.View(w)
+	if m.typing {
+		context = m.typingPanel(w)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left,
-		header, hr, m.now.View(w), hr, m.console.View(), hr, footer)
+		header, hr, context, hr, m.console.View(), hr, footer)
 }
 
 // layout hands the console whatever height the frame leaves.
 func (m *model) layout() {
 	m.footer.Width = m.width
-	m.console.layout(m.width, m.height-frameRows)
+	m.console.layout(m.width, m.height-m.frameRows())
 }
 
 // sayf is a convenience for formatted scrollback lines from the root.

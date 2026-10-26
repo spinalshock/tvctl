@@ -185,6 +185,31 @@ func (c *Client) Toast(ctx context.Context, text string, long bool, pos string) 
 	return c.do(ctx, http.MethodPost, "/toast", map[string]any{"text": text, "long": long, "pos": pos}, nil)
 }
 
+// InputState is what the TV's focused text field holds, read by the
+// companion app (the remote protocol can't tell a placeholder from text).
+// Prompt and Step come from keyboards that title and count their fields
+// (Amazon's setup keypad: "Enter DNS 1", "4 of 5"). Key changes whenever
+// focus moves to a different field. Text is empty while the field shows its
+// hint, and always for passwords.
+type InputState struct {
+	Open     bool   `json:"open"`
+	Prompt   string `json:"prompt"`
+	Step     string `json:"step"`
+	Hint     string `json:"hint"`
+	Text     string `json:"text"`
+	Password bool   `json:"password"`
+	Key      string `json:"key"`
+}
+
+// Input reads the TV's focused text field.
+func (c *Client) Input(ctx context.Context) (*InputState, error) {
+	var st InputState
+	if err := c.do(ctx, http.MethodGet, "/input", nil, &st); err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
 // Control drives the active media session of whatever app is playing:
 // play, pause, toggle, stop, next, previous, seek (absolute ms), seek_by
 // (relative ms, negative to rewind).

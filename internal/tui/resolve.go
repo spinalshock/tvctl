@@ -103,13 +103,6 @@ func (m *model) isVerb(word string) bool {
 	return m.verbWords[word]
 }
 
-// isCommand reports whether the first word is a verb or built-in, so that
-// `vol up` still works while the TV's keyboard is open.
-func (m *model) isCommand(line string) bool {
-	head := strings.ToLower(strings.Fields(line)[0])
-	return isBuiltin(head) || m.isVerb(head)
-}
-
 // noAsk is the TUI's answer to a command that wants to prompt (pairing):
 // not here. Pairing is a one-time terminal job.
 func noAsk(prompt string) (string, error) {
