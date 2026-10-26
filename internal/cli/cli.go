@@ -83,7 +83,7 @@ func Root(env *Env) *cobra.Command {
 			root.AddCommand(c)
 		}
 	}
-	add(groupSetup, e.discover(), e.pair(), e.setup(), e.devices(), e.status(), e.initCmd(), e.shell())
+	add(groupSetup, e.discover(), e.pair(), e.setup(), e.devices(), e.status(), e.initCmd(), e.shell(), e.install())
 	add(groupRemote, e.key(), e.vol(), e.sleep(), e.wake(), e.text(), e.say())
 	add(groupApps, e.openCmd(), e.apps(), e.search(), e.yt())
 	add(groupMedia, e.play(), e.now(), e.pause(), e.resume(), e.toggle(), e.stop(), e.next(), e.prev(), e.seek(), e.events())
