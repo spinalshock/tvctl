@@ -279,8 +279,8 @@ func need[T any](d device.Device, what string) (T, error) {
 // Exported so the TUI can offer them in completion.
 var Aliases = map[string]string{
 	"netflix":    "com.netflix.ninja",
-	"youtube":    "com.amazon.firetv.youtube",
-	"yt":         "com.amazon.firetv.youtube",
+	"youtube":    YouTubeApp,
+	"yt":         YouTubeApp,
 	"spotify":    "com.spotify.tv.android",
 	"silk":       "com.amazon.cloud9",
 	"browser":    "com.amazon.cloud9",
@@ -365,12 +365,24 @@ func (s *session) resolveApp(name string) (string, error) {
 // URL routing via the companion app (Netflix titles deep-link, web pages
 // open in Silk); without the app, fall back to the stock route.
 func (s *session) openLink(link string) error {
-	if s.rc != nil && !strings.Contains(strings.ToLower(link), "youtu") {
-		needs, err := s.rc.Open(s.ctx, link, "")
-		if err != nil {
+	if !strings.Contains(link, "://") {
+		link = "https://" + link // "youtube.com/watch?v=..." pasted without a scheme
+	}
+	if s.rc != nil {
+		// YouTube links go to the YouTube app tvctl uses (SmartTube); the
+		// rest to whatever on the TV handles them.
+		pkg := ""
+		if isYouTube(link) {
+			pkg = YouTubeApp
+		}
+		needs, err := s.rc.Open(s.ctx, link, pkg)
+		if err == nil {
+			return s.bringForward(needs)
+		}
+		if pkg == "" {
 			return err
 		}
-		return s.bringForward(needs)
+		// SmartTube missing or refusing the link: fall back to the TV's own route.
 	}
 	o, err := need[device.URLOpener](s.dev, "opening URLs")
 	if err != nil {
@@ -379,9 +391,18 @@ func (s *session) openLink(link string) error {
 	return o.OpenURL(s.ctx, link)
 }
 
+// YouTubeApp is the app tvctl uses for YouTube: SmartTube, an ad-free
+// client, which handles youtube.com and youtu.be links itself.
+const YouTubeApp = "org.smarttube.stable"
+
+func isYouTube(link string) bool {
+	l := strings.ToLower(link)
+	return strings.Contains(l, "youtube.com/") || strings.Contains(l, "youtu.be/")
+}
+
 // isLink is the one definition of "this argument is a URL".
 func isLink(s string) bool {
-	return strings.Contains(s, "://") || strings.HasPrefix(strings.ToLower(s), "www.")
+	return strings.Contains(s, "://") || strings.HasPrefix(strings.ToLower(s), "www.") || isYouTube(s)
 }
 
 // ---- setup verbs ----------------------------------------------------------
@@ -699,8 +720,8 @@ func (e *cmds) openCmd() *cobra.Command {
 		Short:   "Open an app (by alias, name prefix or package) or a link",
 		Long: "Apps: " + strings.Join(AliasNames(), ", ") + "; anything else matches the start of an\n" +
 			"app's name (see `tv apps`), or is a package id when it contains a dot.\n" +
-			"Links: YouTube plays directly; Netflix titles open in Netflix; other web\n" +
-			"pages open in the browser.",
+			"Links: YouTube opens in SmartTube; Netflix titles open in Netflix; other\n" +
+			"web pages open in the browser.",
 		Args: cobra.ExactArgs(1),
 		RunE: e.run(func(s *session, args []string) error {
 			if isLink(args[0]) {
