@@ -18,6 +18,10 @@
          draw richer toasts. Granted by tv setup (appops) or pre-granted by
          the Appstore. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Granted by tv setup (pm grant). Used only to turn ADB debugging back
+         on at boot, because Fire OS switches it off on every restart. -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
     <!-- Launching other apps' launcher activities and reading the app list. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />

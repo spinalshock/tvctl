@@ -99,6 +99,7 @@ func Run(ctx context.Context, e config.Entry, o Options) (string, error) {
 		{"now-playing from other apps", "cmd notification allow_listener " + listener},
 		{"overlay (background starts, rich toasts)", "appops set " + pkg + " SYSTEM_ALERT_WINDOW allow"},
 		{"keep running in background", "cmd appops set " + pkg + " RUN_ANY_IN_BACKGROUND allow"},
+		{"keep ADB on after reboots", "pm grant " + pkg + " android.permission.WRITE_SECURE_SETTINGS"},
 	}
 	for _, g := range grants {
 		if out, err := conn.Shell(ctx, g.cmd); err != nil || strings.Contains(strings.ToLower(out), "error") {
