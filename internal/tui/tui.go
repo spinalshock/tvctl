@@ -263,6 +263,12 @@ func (m *model) dispatch(line string) tea.Cmd {
 	if local != nil {
 		return local()
 	}
+	return m.runArgv(line, argv)
+}
+
+// runArgv runs a CLI command from argv directly, for callers whose
+// arguments (file paths with spaces) mustn't go through word splitting.
+func (m *model) runArgv(line string, argv []string) tea.Cmd {
 	run := func() tea.Msg {
 		var buf bytes.Buffer
 		t0 := time.Now()
@@ -369,6 +375,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.waitEvent()
 
 	case chosenMsg:
+		if msg.purpose == "wallpaper" {
+			return m, m.setWallpaper(msg)
+		}
 		m.player.chosen(msg)
 		return m, nil
 

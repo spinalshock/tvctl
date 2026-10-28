@@ -15,7 +15,7 @@ import (
 
 // builtins are the prompt-only words the TUI handles itself; everything
 // else is a CLI verb. Resolver, command check and completion all read this.
-var builtins = []string{"help", "keys", "files", "view", "clear", "quit", "exit"}
+var builtins = []string{"help", "keys", "files", "wallpaper", "view", "clear", "quit", "exit"}
 
 func isBuiltin(word string) bool {
 	for _, b := range builtins {
@@ -49,7 +49,12 @@ func (m *model) resolve(line string) (argv []string, local func() tea.Cmd) {
 	case "help":
 		return nil, func() tea.Cmd { m.help(fields[1:]); return nil }
 	case "files":
-		return nil, func() tea.Cmd { return m.player.chooseFiles() }
+		return nil, func() tea.Cmd { return m.player.chooseFiles("files") }
+	case "wallpaper":
+		if len(fields) == 1 {
+			return nil, func() tea.Cmd { return m.player.chooseFiles("wallpaper") }
+		}
+		return append([]string{"home", "wallpaper"}, fields[1:]...), nil // wallpaper off
 	case "next":
 		if m.player.active() {
 			return nil, func() tea.Cmd { m.player.next(); return nil }
@@ -128,6 +133,7 @@ func (m *model) help(args []string) {
 		say("  <link>            open it (YouTube links play directly)")
 		say("  keys              remote mode: arrow keys go to the TV until esc")
 		say("  files             pick files or a folder in yazi, play them on the TV in order")
+		say("  wallpaper         pick an image in yazi, set it as the home dashboard's background")
 		say("  pause · resume · toggle · stop · next · prev · seek +30   media controls for any app")
 		say("  next · stop       with a playlist running: skip to the next file · end the playlist")
 		say("  shot · view       screenshot the TV · open the last one in yazi")

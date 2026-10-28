@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -27,12 +28,14 @@ type player struct {
 	log      func(string)
 }
 
-// chosenMsg carries yazi's selection; execDoneMsg any other external
+// chosenMsg carries yazi's selection and what it was for ("files" to
+// play, "wallpaper" for the home dashboard); execDoneMsg any other external
 // program's exit; shotMsg a finished screenshot.
 type (
 	chosenMsg struct {
-		paths []string
-		err   error
+		purpose string
+		paths   []string
+		err     error
 	}
 	execDoneMsg struct{ err error }
 )
@@ -42,9 +45,9 @@ func (p *player) active() bool { return p.pl != nil }
 // chooseFiles hands the terminal to yazi in chooser mode. tea.ExecProcess
 // suspends the TUI, runs the program, and restores the screen; the chosen
 // paths come back through the temp file yazi writes on confirm.
-func (p *player) chooseFiles() tea.Cmd {
+func (p *player) chooseFiles(purpose string) tea.Cmd {
 	if p.rc == nil {
-		p.log(styleErr.Render("  files needs the companion app: run tv setup"))
+		p.log(styleErr.Render("  " + purpose + " needs the companion app: run tv setup"))
 		return nil
 	}
 	if _, err := exec.LookPath("yazi"); err != nil {
@@ -62,11 +65,11 @@ func (p *player) chooseFiles() tea.Cmd {
 	return tea.ExecProcess(c, func(err error) tea.Msg {
 		defer os.Remove(tmp)
 		if err != nil {
-			return chosenMsg{err: err}
+			return chosenMsg{purpose: purpose, err: err}
 		}
 		b, err := os.ReadFile(tmp)
 		if err != nil {
-			return chosenMsg{err: err}
+			return chosenMsg{purpose: purpose, err: err}
 		}
 		var paths []string
 		for _, l := range strings.Split(string(b), "\n") {
@@ -74,7 +77,7 @@ func (p *player) chooseFiles() tea.Cmd {
 				paths = append(paths, l)
 			}
 		}
-		return chosenMsg{paths: paths}
+		return chosenMsg{purpose: purpose, paths: paths}
 	})
 }
 
@@ -212,4 +215,25 @@ func (p *player) viewShot() tea.Cmd {
 	}
 	c := exec.Command("yazi", p.lastShot)
 	return tea.ExecProcess(c, func(err error) tea.Msg { return execDoneMsg{err: err} })
+}
+
+// setWallpaper uploads yazi's pick as the home dashboard's background. The
+// TV keeps only the current wallpaper: each upload replaces it.
+func (m *model) setWallpaper(msg chosenMsg) tea.Cmd {
+	switch {
+	case msg.err != nil:
+		m.console.say(styleErr.Render("  yazi: " + msg.err.Error()))
+		return nil
+	case len(msg.paths) == 0:
+		m.console.say(styleDim.Render("  no image chosen"))
+		return nil
+	}
+	path := msg.paths[0]
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg", ".png", ".webp":
+	default:
+		m.console.say(styleErr.Render("  not an image (jpg, png, webp): " + filepath.Base(path)))
+		return nil
+	}
+	return m.runArgv("wallpaper "+filepath.Base(path), []string{"home", "wallpaper", path})
 }

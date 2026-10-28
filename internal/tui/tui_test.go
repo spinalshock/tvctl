@@ -24,6 +24,7 @@ func TestResolve(t *testing.T) {
 		"say switch to hdmi 1":  {"say", "switch", "to", "hdmi", "1"},
 		"Sony LIV":              {"open", "Sony LIV"},
 		"app netflix":           {"app", "netflix"},
+		"wallpaper off":         {"home", "wallpaper", "off"},
 	}
 	for in, want := range cases {
 		got, local := m.resolve(in)
@@ -34,7 +35,7 @@ func TestResolve(t *testing.T) {
 			t.Errorf("%q -> %v, want %v", in, got, want)
 		}
 	}
-	for _, in := range []string{"help", "keys", "quit", "clear"} {
+	for _, in := range []string{"help", "keys", "quit", "clear", "wallpaper"} {
 		if _, local := m.resolve(in); local == nil {
 			t.Errorf("%q should be handled locally", in)
 		}
