@@ -50,6 +50,21 @@
             android:launchMode="singleTop" android:excludeFromRecents="true" />
 
         <!-- Full-screen page pushed from the computer (tv dash). -->
+        <!-- The home dashboard. Main process (already running) so it shows
+             instantly; shown in place of Amazon's home screen when enabled. -->
+        <activity android:name=".HomeActivity" android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:stateNotNeeded="true"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density|fontScale" />
+
+        <!-- Full-screen HDMI input via the TV Input Framework (TvView). -->
+        <activity android:name=".HdmiActivity" android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density" />
+
         <activity android:name=".DashActivity" android:exported="false"
             android:process=":ui"
             android:launchMode="singleTask"

@@ -87,7 +87,7 @@ func Root(env *Env) *cobra.Command {
 	add(groupRemote, e.key(), e.vol(), e.sleep(), e.wake(), e.text(), e.say())
 	add(groupApps, e.openCmd(), e.apps(), e.search(), e.yt())
 	add(groupMedia, e.play(), e.now(), e.pause(), e.resume(), e.toggle(), e.stop(), e.next(), e.prev(), e.seek(), e.events())
-	add(groupScreen, e.shot(), e.toast(), e.overlay(), e.watch(), e.dash())
+	add(groupScreen, e.home(), e.shot(), e.toast(), e.overlay(), e.watch(), e.dash())
 	return root
 }
 

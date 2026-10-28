@@ -28,8 +28,33 @@ class TvctlAccessibilityService : AccessibilityService() {
     private var keyboardOpen = false
     private var lastForeground: String? = null
 
+    // Covering Amazon's home screen. An ordinary Home press is covered at
+    // once. But Amazon opens Settings by bringing its home screen up first
+    // and launching Settings on top ~100 ms later, so when Settings may be on
+    // its way (our gear was just pressed, or Alexa was just used) the cover
+    // waits briefly and only goes ahead if home is still the screen.
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
+    private var launcherScreen: String? = null
+    private val coverCheck = Runnable { if (launcherScreen == AMAZON_HOME) coverAmazonHome() }
+    private var alexaAt = -60_000L
+
     override fun onServiceConnected() {
         instance = this
+        // Amazon's home may already be on screen (boot, or this app was just
+        // updated): no window change will come for it, so check now.
+        main.postDelayed({ coverAmazonHome() }, 500)
+    }
+
+    /** Puts the dashboard over Amazon's home screen if that's what is showing.
+     *  Without an event to say which screen it is, the active window's title
+     *  tells Amazon's home ("Home") from its Settings ("KFTV Launcher"). */
+    fun coverAmazonHome() {
+        if (!HomeConfig.enabled(this)) return
+        val w = runCatching { windows.firstOrNull { it.isActive && it.type == AccessibilityWindowInfo.TYPE_APPLICATION } }.getOrNull() ?: return
+        val root = w.root ?: return
+        val pkg = root.packageName?.toString()
+        root.recycle()
+        if (pkg == AMAZON_HOME_PKG && w.title?.toString() == "Home") HomeActivity.show(this)
     }
 
     override fun onDestroy() {
@@ -48,6 +73,20 @@ class TvctlAccessibilityService : AccessibilityService() {
                     nowPlaying()?.foreground = pkg
                 }
                 checkKeyboard(pkg)
+                // Our home dashboard covers Amazon's home screen, and only that
+                // screen: Settings lives in the same app and stays reachable.
+                if (pkg == "com.amazon.vizzini") alexaAt = android.os.SystemClock.uptimeMillis()
+                if (pkg == AMAZON_HOME_PKG) {
+                    launcherScreen = e.className?.toString()
+                    if (launcherScreen == AMAZON_HOME && HomeConfig.enabled(this)) {
+                        main.removeCallbacks(coverCheck)
+                        val now = android.os.SystemClock.uptimeMillis()
+                        if (now - settingsAt < 2_000 || now - alexaAt < 15_000) main.postDelayed(coverCheck, 300)
+                        else HomeActivity.show(this)
+                    }
+                } else if (pkg != null && !pkg.startsWith("com.android.systemui") && pkg != "com.amazon.vizzini") {
+                    launcherScreen = null  // another app came forward
+                }
             }
             AccessibilityEvent.TYPE_WINDOWS_CHANGED -> checkKeyboard(pkg)
             AccessibilityEvent.TYPE_VIEW_FOCUSED -> {
@@ -78,6 +117,12 @@ class TvctlAccessibilityService : AccessibilityService() {
     private fun nowPlaying(): NowPlaying? = HttpServerHolder.now
 
     companion object {
+        const val AMAZON_HOME_PKG = "com.amazon.tv.launcher"
+
+        /** When our dashboard last asked for Settings (uptime ms). */
+        @Volatile var settingsAt = -60_000L
+        const val AMAZON_HOME = "com.amazon.tv.launcher.ui.HomeActivity_vNext"
+
         @Volatile private var instance: TvctlAccessibilityService? = null
 
         /** The running service, or null when accessibility isn't enabled. */

@@ -78,6 +78,12 @@ class HttpServer(private val ctx: Context, port: Int, private val now: NowPlayin
             s.method == Method.POST && path == "/control" -> control(body(s))
             s.method == Method.GET && path == "/shot" -> shot()
             s.method == Method.GET && path == "/input" -> inputGet()
+            s.method == Method.GET && path == "/home" -> ok(HomeConfig.toJson(ctx))
+            s.method == Method.POST && path == "/home" -> homeSet(body(s))
+            s.method == Method.POST && path == "/home/wallpaper" -> wallpaperSet(s)
+            s.method == Method.DELETE && path == "/home/wallpaper" -> {
+                HomeConfig.wallpaper(ctx).delete(); HomeConfig.changed(); ok(HomeConfig.toJson(ctx))
+            }
             else -> json(Response.Status.NOT_FOUND, JSONObject().put("error", "no such route"))
         }
     }
@@ -309,6 +315,51 @@ class HttpServer(private val ctx: Context, port: Int, private val now: NowPlayin
     private fun inputGet(): Response {
         val svc = TvctlAccessibilityService.get() ?: return noA11y()
         return ok(InputSession.snapshot(svc))
+    }
+
+    /** {enabled?: bool, tiles?: [{type: "app"|"input", id}]}; replies with the result. */
+    private fun homeSet(b: JSONObject): Response {
+        if (b.has("tiles")) {
+            val a = b.optJSONArray("tiles")
+                ?: return json(Response.Status.BAD_REQUEST, JSONObject().put("error", "tiles must be a list"))
+            val tiles = (0 until a.length()).map { a.getJSONObject(it).let { o -> HomeConfig.Tile(o.optString("type"), o.optString("id")) } }
+            tiles.firstOrNull { !(it.type == "app" && it.id.isNotEmpty()) && !(it.type == "input" && it.id in HomeConfig.inputKeys) }?.let {
+                return json(Response.Status.BAD_REQUEST, JSONObject().put("error", "bad tile ${it.type}:${it.id} (apps by package, inputs hdmi1..hdmi4)"))
+            }
+            HomeConfig.setTiles(ctx, tiles)
+        }
+        if (b.has("enabled")) {
+            HomeConfig.setEnabled(ctx, b.optBoolean("enabled"))
+            if (b.optBoolean("enabled")) TvctlAccessibilityService.get()?.let { svc -> main.post { svc.coverAmazonHome() } }
+        }
+        return ok(HomeConfig.toJson(ctx))
+    }
+
+    /** The raw image is the request body. Checked to be a decodable image
+     *  before it replaces the current wallpaper. */
+    private fun wallpaperSet(s: IHTTPSession): Response {
+        val len = s.headers["content-length"]?.toLongOrNull()
+            ?: return json(Response.Status.BAD_REQUEST, JSONObject().put("error", "content-length required"))
+        if (len <= 0 || len > 25L shl 20) return json(Response.Status.BAD_REQUEST, JSONObject().put("error", "image must be under 25 MB"))
+        val tmp = java.io.File(ctx.filesDir, "home_wallpaper.tmp")
+        tmp.outputStream().use { out ->
+            val buf = ByteArray(64 * 1024)
+            var left = len
+            while (left > 0) {
+                val n = s.inputStream.read(buf, 0, minOf(buf.size.toLong(), left).toInt())
+                if (n < 0) break
+                out.write(buf, 0, n); left -= n
+            }
+        }
+        val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(tmp.path, o)
+        if (o.outWidth <= 0) {
+            tmp.delete()
+            return json(Response.Status.BAD_REQUEST, JSONObject().put("error", "not an image Android can read"))
+        }
+        tmp.renameTo(HomeConfig.wallpaper(ctx))
+        HomeConfig.changed()
+        return ok(HomeConfig.toJson(ctx).put("size", "${o.outWidth}x${o.outHeight}"))
     }
 
     private fun noA11y() = json(Response.Status.SERVICE_UNAVAILABLE,

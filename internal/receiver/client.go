@@ -75,18 +75,23 @@ func (c *Client) Reachable() bool {
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
 	var rdr io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
+	ctype := "application/json"
+	switch b := body.(type) {
+	case nil:
+	case []byte: // sent as-is (an image upload)
+		rdr, ctype = bytes.NewReader(b), "application/octet-stream"
+	default:
+		j, err := json.Marshal(b)
 		if err != nil {
 			return err
 		}
-		rdr = bytes.NewReader(b)
+		rdr = bytes.NewReader(j)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base()+path, rdr)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", ctype)
 	if c.Token != "" {
 		req.Header.Set("X-Token", c.Token)
 	}
@@ -208,6 +213,58 @@ func (c *Client) Input(ctx context.Context) (*InputState, error) {
 		return nil, err
 	}
 	return &st, nil
+}
+
+// HomeTile is one tile on the TV's home dashboard: an app (by package) or
+// an input ("hdmi1".."hdmi4"). Label and Installed are filled in by the TV.
+type HomeTile struct {
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	Label     string `json:"label,omitempty"`
+	Installed bool   `json:"installed,omitempty"`
+}
+
+// HomeState is the home dashboard's settings on the TV.
+type HomeState struct {
+	Enabled   bool       `json:"enabled"`
+	Tiles     []HomeTile `json:"tiles"`
+	Wallpaper bool       `json:"wallpaper"`
+}
+
+// Home reads the dashboard's settings.
+func (c *Client) Home(ctx context.Context) (*HomeState, error) {
+	var st HomeState
+	return &st, c.do(ctx, http.MethodGet, "/home", nil, &st)
+}
+
+// SetHome changes whether the dashboard replaces Amazon's home screen
+// (enabled nil: unchanged) and/or its tiles (nil: unchanged).
+func (c *Client) SetHome(ctx context.Context, enabled *bool, tiles []HomeTile) (*HomeState, error) {
+	body := map[string]any{}
+	if enabled != nil {
+		body["enabled"] = *enabled
+	}
+	if tiles != nil {
+		t := make([]HomeTile, len(tiles))
+		for i, x := range tiles {
+			t[i] = HomeTile{Type: x.Type, ID: x.ID}
+		}
+		body["tiles"] = t
+	}
+	var st HomeState
+	return &st, c.do(ctx, http.MethodPost, "/home", body, &st)
+}
+
+// SetWallpaper uploads an image as the dashboard's background.
+func (c *Client) SetWallpaper(ctx context.Context, img []byte) (*HomeState, error) {
+	var st HomeState
+	return &st, c.do(ctx, http.MethodPost, "/home/wallpaper", img, &st)
+}
+
+// ClearWallpaper goes back to the built-in dark background.
+func (c *Client) ClearWallpaper(ctx context.Context) (*HomeState, error) {
+	var st HomeState
+	return &st, c.do(ctx, http.MethodDelete, "/home/wallpaper", nil, &st)
 }
 
 // Control drives the active media session of whatever app is playing:
