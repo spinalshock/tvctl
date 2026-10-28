@@ -53,6 +53,7 @@ class HomeActivity : Activity() {
     private var moving: View? = null
     private var wiggle: ObjectAnimator? = null
     private var swallowCenterUp = false
+    private var leaving = false  // we opened something ourselves: no curtain
 
     private val tick = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) = updateClock()
@@ -86,6 +87,7 @@ class HomeActivity : Activity() {
             }
             contentDescription = "Settings"
             setOnClickListener {
+                leaving = true
                 TvctlAccessibilityService.settingsAt = android.os.SystemClock.uptimeMillis()  // don't cover Settings on its way
                 startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             }
@@ -116,8 +118,18 @@ class HomeActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        leaving = false
+        Curtain.hide()
         updateClock()
         if (currentFocus == null || currentFocus?.parent != row) row.getChildAt(0)?.requestFocus()
+    }
+
+    /** Paused without us opening anything: most likely Home was pressed,
+     *  and Amazon's home screen is about to flash up. Hide it (see Curtain).
+     *  Not after Alexa: she may be opening Settings, which should show. */
+    override fun onPause() {
+        super.onPause()
+        if (!leaving && moving == null && HomeConfig.enabled(this) && !TvctlAccessibilityService.alexaRecent()) Curtain.show(this)
     }
 
     override fun onDestroy() {
@@ -236,6 +248,7 @@ class HomeActivity : Activity() {
     }
 
     private fun open(t: HomeConfig.Tile) {
+        leaving = true
         when (t.type) {
             "input" -> {
                 val n = HomeConfig.inputKeys[t.id] ?: return

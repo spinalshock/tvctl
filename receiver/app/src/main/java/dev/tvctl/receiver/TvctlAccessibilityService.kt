@@ -36,7 +36,6 @@ class TvctlAccessibilityService : AccessibilityService() {
     private val main = android.os.Handler(android.os.Looper.getMainLooper())
     private var launcherScreen: String? = null
     private val coverCheck = Runnable { if (launcherScreen == AMAZON_HOME) coverAmazonHome() }
-    private var alexaAt = -60_000L
 
     override fun onServiceConnected() {
         instance = this
@@ -76,6 +75,9 @@ class TvctlAccessibilityService : AccessibilityService() {
                 // Our home dashboard covers Amazon's home screen, and only that
                 // screen: Settings lives in the same app and stays reachable.
                 if (pkg == "com.amazon.vizzini") alexaAt = android.os.SystemClock.uptimeMillis()
+                // The curtain stays only while Amazon's home is on its way; any
+                // other screen (Settings, Alexa, an app) lifts it at once.
+                if (pkg != null && pkg != packageName && !(pkg == AMAZON_HOME_PKG && e.className?.toString() == AMAZON_HOME)) Curtain.hide()
                 if (pkg == AMAZON_HOME_PKG) {
                     launcherScreen = e.className?.toString()
                     if (launcherScreen == AMAZON_HOME && HomeConfig.enabled(this)) {
@@ -121,6 +123,11 @@ class TvctlAccessibilityService : AccessibilityService() {
 
         /** When our dashboard last asked for Settings (uptime ms). */
         @Volatile var settingsAt = -60_000L
+
+        /** When Alexa's overlay last appeared (uptime ms). */
+        @Volatile var alexaAt = -60_000L
+
+        fun alexaRecent() = android.os.SystemClock.uptimeMillis() - alexaAt < 15_000
         const val AMAZON_HOME = "com.amazon.tv.launcher.ui.HomeActivity_vNext"
 
         @Volatile private var instance: TvctlAccessibilityService? = null
