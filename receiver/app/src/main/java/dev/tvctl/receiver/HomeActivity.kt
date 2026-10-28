@@ -54,6 +54,8 @@ class HomeActivity : Activity() {
     private var wiggle: ObjectAnimator? = null
     private var swallowCenterUp = false
     private var leaving = false  // we opened something ourselves: no curtain
+    private lateinit var settingsPanel: LinearLayout
+    private lateinit var gearView: View
 
     private val tick = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) = updateClock()
@@ -86,14 +88,11 @@ class HomeActivity : Activity() {
                     GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.argb(70, 255, 255, 255)) })
             }
             contentDescription = "Settings"
-            setOnClickListener {
-                leaving = true
-                TvctlAccessibilityService.settingsAt = android.os.SystemClock.uptimeMillis()  // don't cover Settings on its way
-                startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            }
+            setOnClickListener { showSettings() }
         }
         top.addView(clock)
         top.addView(gear, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginStart = dp(16) })
+        gearView = gear
         root.addView(top, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply {
             topMargin = dp(28); marginEnd = dp(40)
         })
@@ -108,6 +107,10 @@ class HomeActivity : Activity() {
         shelf.addView(scroller, LinearLayout.LayoutParams(-2, -2))
         shelf.addView(name, LinearLayout.LayoutParams(-1, -2))
         root.addView(shelf, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { bottomMargin = dp(72) })
+        settingsPanel = settingsPanel()
+        root.addView(settingsPanel, FrameLayout.LayoutParams(dp(300), -2, Gravity.TOP or Gravity.END).apply {
+            topMargin = dp(84); marginEnd = dp(40)
+        })
         root.clipChildren = false
         setContentView(root)
 
@@ -229,10 +232,12 @@ class HomeActivity : Activity() {
     private fun art(t: HomeConfig.Tile): Drawable? {
         if (t.type != "app") return null
         val pm = packageManager
+        val pkg = HomeConfig.face(this, t)
+        val ai = HomeConfig.info(this, pkg) ?: return null
         val d = runCatching {
-            pm.getApplicationBanner(t.id)
-                ?: pm.getLeanbackLaunchIntentForPackage(t.id)?.let { pm.getActivityBanner(it) }
-                ?: pm.getApplicationIcon(t.id)
+            pm.getApplicationBanner(ai)
+                ?: pm.getLeanbackLaunchIntentForPackage(pkg)?.let { pm.getActivityBanner(it) }
+                ?: pm.getApplicationIcon(ai)
         }.getOrNull() ?: return null
         val w = (tileW * 1.12f).toInt()
         val h = w * 9 / 16
@@ -261,6 +266,64 @@ class HomeActivity : Activity() {
                 startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             }
         }
+    }
+
+    // ---- settings -------------------------------------------------------
+
+    /** The Settings pages any app may open. They live in Amazon's settings
+     *  app, which opens them directly, so Back returns straight here. The
+     *  main menu (and Display & Sounds, Preferences, Accessibility, which
+     *  only Amazon's launcher may open) goes through Amazon's own Settings. */
+    private val settingsPages = listOf(
+        "Network" to "network.NetworkActivity",
+        "Applications" to "applications.ApplicationsActivity",
+        "Remotes & Bluetooth" to "controllers_bluetooth_devices.ControllersAndBluetoothActivity",
+        "Device & Software" to "device.DeviceActivity",
+        "All settings…" to null,
+    )
+
+    private fun settingsPanel() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        visibility = View.GONE
+        setPadding(dp(8), dp(8), dp(8), dp(8))
+        background = GradientDrawable().apply { cornerRadius = dp(16).toFloat(); setColor(Color.argb(225, 22, 22, 30)) }
+        settingsPages.forEach { (name, page) ->
+            addView(TextView(this@HomeActivity).apply {
+                text = name; setTextColor(Color.WHITE); textSize = 18f
+                setPadding(dp(18), dp(12), dp(18), dp(12))
+                isFocusable = true; isClickable = true
+                background = StateListDrawable().apply {
+                    addState(intArrayOf(android.R.attr.state_focused),
+                        GradientDrawable().apply { cornerRadius = dp(10).toFloat(); setColor(Color.argb(60, 255, 255, 255)) })
+                }
+                setOnClickListener { openSettings(page) }
+            }, LinearLayout.LayoutParams(-1, -2))
+        }
+    }
+
+    private fun showSettings() {
+        settingsPanel.visibility = View.VISIBLE
+        settingsPanel.getChildAt(0)?.requestFocus()
+    }
+
+    private fun hideSettings(focusGear: Boolean) {
+        settingsPanel.visibility = View.GONE
+        if (focusGear) gearView.requestFocus()
+    }
+
+    private fun openSettings(page: String?) {
+        leaving = true
+        hideSettings(focusGear = false)
+        row.getChildAt(0)?.requestFocus()
+        if (page == null) {
+            TvctlAccessibilityService.settingsAt = android.os.SystemClock.uptimeMillis()  // don't cover Settings on its way
+            startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            return
+        }
+        val cls = "com.amazon.tv.settings.v2.tv.$page"
+        runCatching {
+            startActivity(Intent().setClassName("com.amazon.tv.settings.v2", cls).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }.onFailure { leaving = false; toast("Couldn't open that page: ${it.message}") }
     }
 
     // ---- reordering ----------------------------------------------------
@@ -297,6 +360,10 @@ class HomeActivity : Activity() {
     }
 
     override fun dispatchKeyEvent(e: KeyEvent): Boolean {
+        if (e.keyCode == KeyEvent.KEYCODE_BACK && settingsPanel.visibility == View.VISIBLE) {
+            if (e.action == KeyEvent.ACTION_UP) hideSettings(focusGear = true)
+            return true
+        }
         val m = moving ?: return super.dispatchKeyEvent(e)
         when (e.keyCode) {
             KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> {

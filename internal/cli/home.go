@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -164,7 +165,9 @@ func (e *cmds) homeWallpaper() *cobra.Command {
 		RunE: e.runRC(func(s *session, args []string) error {
 			var st *receiver.HomeState
 			var err error
+			msg := fmt.Sprintf("✓ %s is now the TV's wallpaper", filepath.Base(args[0]))
 			if args[0] == "off" {
+				msg = "✓ wallpaper cleared: back to the default"
 				st, err = s.rc.ClearWallpaper(s.ctx)
 			} else {
 				img, rerr := os.ReadFile(args[0])
@@ -179,7 +182,7 @@ func (e *cmds) homeWallpaper() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			e.emit(describeHome(st), st)
+			e.emit(msg, st)
 			return nil
 		}),
 	}

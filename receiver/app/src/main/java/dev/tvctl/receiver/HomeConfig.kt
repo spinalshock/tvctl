@@ -60,12 +60,25 @@ object HomeConfig {
         android.os.Handler(android.os.Looper.getMainLooper()).post(l)
     }
 
+    /** Apps that wear another app's face on their tile: SmartTube is YouTube
+     *  to the viewer, and the official YouTube app (disabled, not removed)
+     *  still carries the real banner and name. */
+    private val faces = mapOf("org.smarttube.stable" to "com.amazon.firetv.youtube")
+
+    /** The package whose banner and name a tile shows: its face if that app
+     *  is still on the TV (enabled or not), else the app itself. */
+    fun face(ctx: Context, t: Tile): String {
+        val f = faces[t.id] ?: return t.id
+        return if (info(ctx, f) != null) f else t.id
+    }
+
+    fun info(ctx: Context, pkg: String) = runCatching {
+        ctx.packageManager.getApplicationInfo(pkg, PackageManager.MATCH_DISABLED_COMPONENTS)
+    }.getOrNull()
+
     fun label(ctx: Context, t: Tile): String = when (t.type) {
         "input" -> t.id.replace("hdmi", "HDMI ")
-        else -> runCatching {
-            val pm = ctx.packageManager
-            pm.getApplicationLabel(pm.getApplicationInfo(t.id, 0)).toString()
-        }.getOrDefault(t.id)
+        else -> info(ctx, face(ctx, t))?.let { ctx.packageManager.getApplicationLabel(it).toString() } ?: t.id
     }
 
     fun installed(ctx: Context, t: Tile): Boolean = t.type != "app" || runCatching {
