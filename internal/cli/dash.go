@@ -2,12 +2,13 @@ package cli
 
 import (
 	_ "embed"
-	"errors"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/omAthalye/tvctl/internal/device"
 )
 
 //go:embed dash/clock.html
@@ -28,25 +29,30 @@ func (e *cmds) dash() *cobra.Command {
 	var base string
 	var watch bool
 	c := &cobra.Command{
-		Use:   "dash [clock|<file.html>|<url>|js <code>|off]",
-		Short: "Show a full-screen page on the TV (clock by default)",
-		RunE: e.runRC(func(s *session, args []string) error {
-			cx, rc := s.ctx, s.rc
+		Use:         "dash [clock|<file.html>|<url>|js <code>|off]",
+		Short:       "Show a full-screen page on the TV (clock by default)",
+		Annotations: meta(needsCompanion, "none"),
+		RunE: e.run(func(s *session, args []string) error {
+			rc, err := NeedAddon[device.Dasher](s.dev, "full-screen pages")
+			if err != nil {
+				return err
+			}
+			cx := s.ctx
 			if len(args) >= 1 {
 				switch args[0] {
 				case "off", "close":
 					if err := rc.DashClose(cx); err != nil {
 						return err
 					}
-					return e.ok("dashboard closed", map[string]any{"open": false})
+					return e.ok("", map[string]any{"open": false})
 				case "js":
 					if len(args) < 2 {
-						return errors.New("dash js: give the code to run")
+						return device.Fail("dash js needs the code to run")
 					}
 					if err := rc.DashJS(cx, strings.Join(args[1:], " ")); err != nil {
 						return err
 					}
-					return e.ok("ok", nil)
+					return e.ok("", nil)
 				}
 			}
 
@@ -60,18 +66,12 @@ func (e *cmds) dash() *cobra.Command {
 					file = args[0]
 					b, err := os.ReadFile(file)
 					if err != nil {
-						return err
+						return device.Failf("couldn't read %s", file).Because(err)
 					}
 					html = string(b)
 				}
 			}
-			push := func() error {
-				needs, err := rc.Dash(cx, html, url, base)
-				if err != nil {
-					return err
-				}
-				return s.bringForward(needs)
-			}
+			push := func() error { return rc.Dash(cx, html, url, base) }
 			if err := push(); err != nil {
 				return err
 			}
@@ -81,7 +81,8 @@ func (e *cmds) dash() *cobra.Command {
 			} else if file != "" {
 				what = file
 			}
-			e.emit("showing "+what, map[string]any{"open": true, "source": what})
+			e.notice("showing " + what)
+			e.emit("", map[string]any{"open": true, "source": what})
 
 			if !watch || file == "" {
 				return nil

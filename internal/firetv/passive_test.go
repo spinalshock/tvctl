@@ -3,6 +3,7 @@ package firetv
 import (
 	"context"
 	"errors"
+	"github.com/omAthalye/tvctl/internal/device"
 	"testing"
 	"time"
 )
@@ -17,8 +18,8 @@ func TestKeyboardOpenIsPassive(t *testing.T) {
 	defer cancel()
 	start := time.Now()
 	_, _, err := c.KeyboardOpen(ctx)
-	if !errors.Is(err, ErrAsleep) {
-		t.Fatalf("want ErrAsleep, got %v", err)
+	if !errors.Is(err, device.ErrAsleep) {
+		t.Fatalf("want device.ErrAsleep, got %v", err)
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Fatalf("probe took %v; a passive probe must not wait for a kick", time.Since(start))

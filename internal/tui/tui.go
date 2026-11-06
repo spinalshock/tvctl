@@ -41,8 +41,6 @@ import (
 	"github.com/omAthalye/tvctl/internal/cli"
 	"github.com/omAthalye/tvctl/internal/config"
 	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/firetv"
-	"github.com/omAthalye/tvctl/internal/receiver"
 )
 
 var debugLog io.Writer
@@ -82,35 +80,37 @@ type model struct {
 	width  int
 	height int
 
-	devName   string
-	devHost   string
-	verbs     []string
-	verbWords map[string]bool // verb names and aliases, built on first use
-	apps      []device.App    // cached once at start, for completion
+	devName     string
+	devHost     string
+	verbs       []string
+	verbWords   map[string]bool     // verb names and aliases, built on first use
+	verbChoices map[string][]string // each verb's fixed argument values, built on first use
+	apps        []device.App        // cached once at start, for completion
 
-	dev    device.Device    // stock-API driver, for keyboard polling
-	rc     *receiver.Client // nil when the companion app isn't set up
-	events chan receiver.Event
+	dev    device.Device // the TV, with whatever it can do (companion app included)
+	events chan device.Event
 	ticks  int
 
 	typing bool        // the TV wants text: the prompt mirrors its field (typing.go)
 	asleep bool        // last keyboard probe found the TV in standby
 	t      typingState // typing mode's state (typing.go)
+	toast  toastState  // the success card over the middle (toast.go)
 }
 
 // Messages from background work.
 type (
 	resultMsg struct {
-		cmd  string
-		out  string
-		err  error
-		took time.Duration
+		cmd    string
+		out    string
+		err    error
+		took   time.Duration
+		notice string // the command's announced outcome, if any (toast)
 	}
 	appsMsg  []device.App
-	eventMsg receiver.Event
+	eventMsg device.Event
 	tickMsg  time.Time
 	// resyncMsg is a periodic GET /now, a safety net for missed events.
-	resyncMsg struct{ now *receiver.Now }
+	resyncMsg struct{ now *device.Playing }
 	// kbMsg is the result of one keyboard-state poll.
 	kbMsg struct {
 		open   bool
@@ -127,7 +127,11 @@ func newModel() (*model, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, ent, err := st.Resolve("")
+	id, ent, err := st.Resolve("")
+	if err != nil {
+		return nil, err
+	}
+	dev, err := device.Open(cli.DeviceConfig(id, ent))
 	if err != nil {
 		return nil, err
 	}
@@ -137,22 +141,20 @@ func newModel() (*model, error) {
 		devName: ent.Name,
 		devHost: ent.Host,
 		verbs:   cli.Verbs(),
-		events:  make(chan receiver.Event, 32),
-		dev:     firetv.New(ent.Host, ent.Name, ent.Token),
+		events:  make(chan device.Event, 32),
+		dev:     dev,
 	}
-	if ent.ReceiverToken != "" {
-		m.rc = receiver.New(ent.Host, ent.ReceiverToken)
-	}
-	m.now = newNowBar(m.rc != nil)
-	m.player = player{rc: m.rc, dev: m.dev, log: m.console.say}
+	m.now = newNowBar(nowFeed(m.dev))
+	m.now.name = m.appTitle
+	m.player = player{dev: m.dev, log: m.console.say}
 	m.console.complete = m.complete
 	m.console.say(styleDim.Render("tvctl · type help for commands, keys for remote mode, quit to exit"))
 	return m, nil
 }
 
 func (m *model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textinput.Blink, loadApps(), tick(), m.pollKeyboard()}
-	if m.rc != nil {
+	cmds := []tea.Cmd{textinput.Blink, loadApps(m.dev), tick(), m.pollKeyboard()}
+	if _, ok := m.dev.(device.EventSource); ok {
 		cmds = append(cmds, m.connectEvents(), m.waitEvent(), m.fetchInput())
 	}
 	return tea.Batch(cmds...)
@@ -177,7 +179,7 @@ func (m *model) pollKeyboard() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		open, cur, err := kw.KeyboardOpen(ctx)
-		if errors.Is(err, firetv.ErrAsleep) {
+		if errors.Is(err, device.ErrAsleep) {
 			return kbMsg{asleep: true}
 		}
 		if err != nil {
@@ -192,16 +194,20 @@ func (m *model) pollKeyboard() tea.Cmd {
 // them into Bubble Tea messages one at a time, which is the idiomatic way
 // to bridge a long-lived goroutine into the update loop.
 func (m *model) connectEvents() tea.Cmd {
-	rc, ch := m.rc, m.events
+	src, ok := m.dev.(device.EventSource)
+	if !ok {
+		return nil
+	}
+	ch := m.events
 	return func() tea.Msg {
 		go func() {
 			delay := time.Second
 			for {
-				_ = rc.Events(context.Background(), func(ev receiver.Event) error {
+				_ = src.Events(context.Background(), func(ev device.Event) error {
 					ch <- ev
 					return nil
 				})
-				ch <- receiver.Event{Type: "_offline"}
+				ch <- device.Event{Type: "_offline"}
 				time.Sleep(delay)
 				if delay < 15*time.Second {
 					delay *= 2
@@ -218,11 +224,14 @@ func (m *model) waitEvent() tea.Cmd {
 }
 
 func (m *model) resyncNow() tea.Cmd {
-	rc := m.rc
+	p, ok := m.dev.(device.Player)
+	if !ok {
+		return nil
+	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 		defer cancel()
-		n, err := rc.Now(ctx)
+		n, err := p.Playing(ctx)
 		if err != nil {
 			return resyncMsg{}
 		}
@@ -232,24 +241,11 @@ func (m *model) resyncNow() tea.Cmd {
 
 // loadApps fetches the app list once so completion can offer app names
 // without a round-trip per keystroke.
-func loadApps() tea.Cmd {
+func loadApps(dev device.Device) tea.Cmd {
 	return func() tea.Msg {
-		st, err := config.Load()
-		if err != nil {
-			return appsMsg(nil)
-		}
-		_, ent, err := st.Resolve("")
-		if err != nil {
-			return appsMsg(nil)
-		}
-		c := firetv.New(ent.Host, ent.Name, ent.Token)
-		var rc *receiver.Client
-		if ent.ReceiverToken != "" {
-			rc = receiver.New(ent.Host, ent.ReceiverToken)
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		apps, err := cli.AllApps(ctx, c, rc)
+		apps, err := dev.Apps(ctx)
 		if err != nil {
 			return appsMsg(nil)
 		}
@@ -271,9 +267,10 @@ func (m *model) dispatch(line string) tea.Cmd {
 func (m *model) runArgv(line string, argv []string) tea.Cmd {
 	run := func() tea.Msg {
 		var buf bytes.Buffer
+		var notice string
 		t0 := time.Now()
-		err := cli.Run(argv, &cli.Env{Out: &buf, Ask: noAsk})
-		return resultMsg{cmd: line, out: buf.String(), err: err, took: time.Since(t0)}
+		err := cli.Run(argv, &cli.Env{Out: &buf, Ask: noAsk, Notice: func(s string) { notice = s }})
+		return resultMsg{cmd: line, out: buf.String(), err: err, took: time.Since(t0), notice: notice}
 	}
 	return tea.Batch(m.console.begin(line), run)
 }
@@ -331,6 +328,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.player.lastShot = strings.SplitN(msg.out, "\n", 2)[0]
 		}
 		m.console.done(msg.cmd, msg.out, msg.err, msg.took)
+		if msg.err == nil && msg.notice != "" {
+			return m, m.showToast(msg.notice)
+		}
+		return m, nil
+
+	case toastDoneMsg:
+		m.toastDone(msg)
 		return m, nil
 
 	case appsMsg:
@@ -339,7 +343,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.ticks++
-		if m.rc != nil && m.ticks%10 == 0 {
+		if _, rich := m.dev.(device.Player); rich && m.ticks%10 == 0 {
 			return m, tea.Batch(tick(), m.resyncNow())
 		}
 		return m, tick()
@@ -471,8 +475,8 @@ func (m *model) View() string {
 	if m.typing {
 		context = m.typingPanel(w)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left,
-		header, hr, context, hr, m.console.View(), hr, footer)
+	return m.withToast(lipgloss.JoinVertical(lipgloss.Left,
+		header, hr, context, hr, m.console.View(), hr, footer))
 }
 
 // layout hands the console whatever height the frame leaves.

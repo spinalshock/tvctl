@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/omAthalye/tvctl/internal/receiver"
+	"github.com/omAthalye/tvctl/internal/device"
 )
 
 func newTypingModel() *model {
@@ -23,7 +23,7 @@ func keys(m *model, s string) {
 }
 
 func field(key, prompt, step, text string) inputMsg {
-	return inputMsg{st: &receiver.InputState{Open: true, Key: key, Prompt: prompt, Step: step, Text: text}}
+	return inputMsg{st: &device.Field{Open: true, Key: key, Prompt: prompt, Step: step, Text: text}}
 }
 
 // The box matches the TV's field: its text on entry (so a restarted TUI
@@ -53,14 +53,14 @@ func TestBoxMatchesTV(t *testing.T) {
 		t.Fatalf("next field not taken: box=%q label=%q", m.console.input.Value(), m.t.label)
 	}
 	// Closed: leave only if it stays closed past the check.
-	m.Update(inputMsg{st: &receiver.InputState{Open: false}})
+	m.Update(inputMsg{st: &device.Field{Open: false}})
 	gen := m.t.closeGen
 	m.Update(field("B", "Enter the Gateway Address", "3 of 5", "")) // blinked back
 	m.Update(leaveCheckMsg{gen: gen})
 	if !m.typing {
 		t.Fatal("left although the field reopened")
 	}
-	m.Update(inputMsg{st: &receiver.InputState{Open: false}})
+	m.Update(inputMsg{st: &device.Field{Open: false}})
 	m.Update(leaveCheckMsg{gen: m.t.closeGen})
 	if m.typing {
 		t.Fatal("didn't leave a closed field")
@@ -126,7 +126,7 @@ func TestTypingOverlaysKeys(t *testing.T) {
 		t.Fatalf("after Esc: typing=%v mode=%v, want keys mode back", m.typing, m.mode)
 	}
 	m.Update(field("B", "Search", "", ""))
-	m.Update(inputMsg{st: &receiver.InputState{Open: false}})
+	m.Update(inputMsg{st: &device.Field{Open: false}})
 	m.Update(leaveCheckMsg{gen: m.t.closeGen})
 	if m.typing || m.mode != modeKeys {
 		t.Fatalf("after the field closed: typing=%v mode=%v, want keys mode back", m.typing, m.mode)
@@ -162,5 +162,18 @@ func TestTypingErrorShown(t *testing.T) {
 	m.Update(typingErrMsg{errors.New("TV not reachable")})
 	if !strings.Contains(strings.Join(m.console.lines, "\n"), "TV not reachable") {
 		t.Fatal("error not shown")
+	}
+}
+
+// A closed keyboard while not typing leaves the prompt alone: the poll
+// fallback used to "leave typing" on every check, wiping what was typed.
+func TestClosedPollKeepsPrompt(t *testing.T) {
+	m := newTypingModel()
+	keys(m, "youtube ")
+	for i := 0; i < 3; i++ {
+		m.Update(kbMsg{open: false})
+	}
+	if v := m.console.input.Value(); v != "youtube " {
+		t.Fatalf("prompt wiped by keyboard polls: %q", v)
 	}
 }

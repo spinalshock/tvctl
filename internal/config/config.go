@@ -6,10 +6,14 @@ package config
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"time"
+
+	"github.com/omAthalye/tvctl/internal/device"
 )
 
 // Entry is one paired TV. Token is whatever the driver's Pair returned and is
@@ -20,8 +24,9 @@ type Entry struct {
 	Host  string `json:"host"`
 	MAC   string `json:"mac,omitempty"`
 	Token string `json:"token,omitempty"`
-	// ReceiverToken is the companion app's pairing token (tv setup).
-	ReceiverToken string `json:"receiver_token,omitempty"`
+	// CompanionToken is the companion app's pairing token (tv companion).
+	// The JSON key predates the name.
+	CompanionToken string `json:"receiver_token,omitempty"`
 }
 
 // Store is the on-disk document. Default names the entry used when the user
@@ -29,7 +34,19 @@ type Entry struct {
 type Store struct {
 	Default string           `json:"default,omitempty"`
 	Devices map[string]Entry `json:"devices"`
+	// Pending is a pairing waiting for its PIN: `tv pair` showed it on
+	// the TV, `tv pin` will send it back. Nothing stays open in between.
+	Pending *Pending `json:"pending,omitempty"`
 	path    string
+}
+
+// Pending is the TV whose PIN is on screen, and when it was shown; PINs
+// expire, so a stale entry is discarded rather than tried.
+type Pending struct {
+	Brand   string    `json:"brand"`
+	Name    string    `json:"name"`
+	Host    string    `json:"host"`
+	Started time.Time `json:"started"`
 }
 
 // Path follows XDG on macOS and Linux (~/.config/tvctl) rather than Go's
@@ -74,7 +91,7 @@ func Load() (*Store, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal(b, s); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", p, err)
+		return nil, device.Failf("the config file is damaged").Note(p).Because(err)
 	}
 	if s.Devices == nil {
 		s.Devices = map[string]Entry{}
@@ -116,9 +133,23 @@ func (s *Store) Put(id string, e Entry) {
 func (s *Store) Resolve(sel string) (string, Entry, error) {
 	if sel == "" {
 		sel = s.Default
+		// Paired TVs in different homes: when the default isn't on any
+		// network this machine is on, use the one that is.
+		if e, ok := s.Devices[sel]; ok && !onLocalNet(e.Host) {
+			ids := make([]string, 0, len(s.Devices))
+			for id, d := range s.Devices {
+				if onLocalNet(d.Host) {
+					ids = append(ids, id)
+				}
+			}
+			if len(ids) > 0 {
+				sort.Strings(ids) // several here: the same one every time
+				return ids[0], s.Devices[ids[0]], nil
+			}
+		}
 	}
 	if sel == "" {
-		return "", Entry{}, errors.New("no device paired yet: run `tv pair`")
+		return "", Entry{}, device.Fail("no TV paired yet").Note("run tv pair")
 	}
 	if e, ok := s.Devices[sel]; ok {
 		return sel, e, nil
@@ -128,5 +159,25 @@ func (s *Store) Resolve(sel string) (string, Entry, error) {
 			return id, e, nil
 		}
 	}
-	return "", Entry{}, fmt.Errorf("unknown device %q", sel)
+	return "", Entry{}, device.Failf("no TV called %s", sel)
+}
+
+// onLocalNet reports whether host is inside a subnet of one of this
+// machine's interfaces. A hostname or an unreadable interface list counts
+// as local, so this only ever steers away from a TV that clearly isn't here.
+var onLocalNet = func(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return true
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return true
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && !n.IP.IsLoopback() && n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

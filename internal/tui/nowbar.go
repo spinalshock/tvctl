@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/omAthalye/tvctl/internal/receiver"
+	"github.com/omAthalye/tvctl/internal/device"
 )
 
 // nowBar is the two-line now-playing block under the header. It owns the
@@ -17,23 +17,39 @@ import (
 // position with a Bubbles progress bar. Between events it extrapolates the
 // position from the playback speed, so the bar moves every tick.
 type nowBar struct {
-	enabled bool // companion app set up
+	name    func(string) string // app id -> what people call it
+	enabled bool                // the TV has a now-playing feed
+	hint    string              // when it hasn't: what would give it one, if anything
 	state   string
-	now     *receiver.Now
+	now     *device.Playing
 	at      time.Time // when now was received
 	bar     progress.Model
 }
 
-func newNowBar(enabled bool) nowBar {
+// newNowBar is enabled when the TV has a now-playing feed; hint is what
+// the bar says instead when it hasn't (see nowFeed).
+func newNowBar(enabled bool, hint string) nowBar {
 	bar := progress.New(progress.WithGradient("#5fafff", "#87d7af"), progress.WithoutPercentage())
-	state := "not set up"
-	if enabled {
-		state = "offline"
+	state := "offline"
+	if !enabled {
+		state = "not set up"
 	}
-	return nowBar{enabled: enabled, state: state, bar: bar}
+	return nowBar{enabled: enabled, hint: hint, state: state, bar: bar, name: func(id string) string { return id }}
 }
 
-func (n *nowBar) set(now *receiver.Now) {
+// nowFeed reports whether dev gives rich now-playing and, when it
+// doesn't, whether the companion app would.
+func nowFeed(dev device.Device) (enabled bool, hint string) {
+	if _, ok := dev.(device.Player); ok {
+		return true, ""
+	}
+	if _, can := dev.(device.Installer); can {
+		return false, "now-playing, screenshots and local files need the companion app: tv companion"
+	}
+	return false, "this TV has no now-playing feed"
+}
+
+func (n *nowBar) set(now *device.Playing) {
 	n.state = "online"
 	n.now = now
 	n.at = time.Now()
@@ -68,19 +84,19 @@ func (n *nowBar) dot() (string, string) {
 	case "offline":
 		return styleErr.Render("●"), "offline"
 	}
-	return lipgloss.NewStyle().Foreground(warn).Render("●"), "receiver not set up · tv setup"
+	return lipgloss.NewStyle().Foreground(warn).Render("●"), "no now-playing feed"
 }
 
 func (n *nowBar) View(w int) string {
 	empty := styleBarOff.Render("  " + strings.Repeat("╌", max(0, w-4)))
 	if !n.enabled {
-		return styleDim.Render("  now-playing, screenshots and local files need the companion app: tv setup") + "\n" + empty
+		return styleDim.Render("  "+n.hint) + "\n" + empty
 	}
 	cur := n.now
 	if cur == nil || cur.Source == nil {
 		fg := ""
 		if cur != nil && cur.Foreground != nil {
-			fg = "  ·  " + shortApp(*cur.Foreground)
+			fg = "  ·  " + n.name(*cur.Foreground)
 		}
 		return styleDim.Render("  nothing playing"+fg) + "\n" + empty
 	}
@@ -100,7 +116,7 @@ func (n *nowBar) View(w int) string {
 	if cur.Artist != nil && *cur.Artist != "" {
 		title = *cur.Artist + "  —  " + title
 	}
-	left := "  " + symStyle.Render(sym) + " " + styleAccent.Render(shortApp(cur.App)) + "   "
+	left := "  " + symStyle.Render(sym) + " " + styleAccent.Render(n.name(cur.App)) + "   "
 	avail := w - lipgloss.Width(left) - 2
 	var line1 string
 	if strings.TrimSpace(title) == "" {
@@ -135,23 +151,4 @@ func fmtClock(ms int64) string {
 		return fmt.Sprintf("%d:%02d:%02d", s/3600, s%3600/60, s%60)
 	}
 	return fmt.Sprintf("%d:%02d", s/60, s%60)
-}
-
-func shortApp(pkg string) string {
-	known := map[string]string{
-		"com.netflix.ninja":                 "Netflix",
-		"com.amazon.firetv.youtube":         "YouTube",
-		"com.spotify.tv.android":            "Spotify",
-		"com.amazon.firebat":                "Prime Video",
-		"com.amazon.cloud9":                 "Silk",
-		"com.amazon.venezia":                "Appstore",
-		"com.spocky.projengmenu":            "Projectivy",
-		"com.amazon.tv.launcher":            "Fire TV Home",
-		"dev.tvctl.receiver":                "tvctl player",
-		"com.onemainstream.sonyliv.android": "Sony LIV",
-	}
-	if n, ok := known[pkg]; ok {
-		return n
-	}
-	return pkg
 }

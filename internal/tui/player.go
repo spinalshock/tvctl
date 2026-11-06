@@ -12,18 +12,16 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/omAthalye/tvctl/internal/cast"
+	"github.com/omAthalye/tvctl/internal/cli"
 	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/receiver"
 )
 
 // player owns what the TUI does with local files and screenshots: the yazi
 // chooser, the playlist being served, and the last screenshot for `view`.
 // It reports through log, which the root points at the console.
 type player struct {
-	rc       *receiver.Client
 	dev      device.Device
 	pl       *cast.Playlist // local files being served, nil when idle
-	grace    int            // now-events to ignore right after starting an item
 	lastShot string
 	log      func(string)
 }
@@ -46,8 +44,8 @@ func (p *player) active() bool { return p.pl != nil }
 // suspends the TUI, runs the program, and restores the screen; the chosen
 // paths come back through the temp file yazi writes on confirm.
 func (p *player) chooseFiles(purpose string) tea.Cmd {
-	if p.rc == nil {
-		p.log(styleErr.Render("  " + purpose + " needs the companion app: run tv setup"))
+	if _, err := cli.NeedAddon[device.MediaPlayer](p.dev, purpose); err != nil {
+		p.log(styleErr.Render("  " + err.Error()))
 		return nil
 	}
 	if _, err := exec.LookPath("yazi"); err != nil {
@@ -102,13 +100,17 @@ func (p *player) start(paths []string) {
 	p.stop("")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	pl, err := cast.Start(ctx, p.rc, p.dev, files)
+	mp, err := cli.NeedAddon[device.MediaPlayer](p.dev, "playing files")
+	if err != nil {
+		p.log(styleErr.Render("  " + err.Error()))
+		return
+	}
+	pl, err := cast.Start(ctx, mp, p.dev.Info().Host, files)
 	if err != nil {
 		p.log(styleErr.Render("  " + err.Error()))
 		return
 	}
 	p.pl = pl
-	p.grace = 3
 	p.announce()
 }
 
@@ -119,25 +121,16 @@ func (p *player) announce() {
 
 // observe is called on every now event while a playlist runs: advance
 // when the item ends, stop when the user leaves the player.
-func (p *player) observe(n *receiver.Now) {
+func (p *player) observe(n *device.Playing) {
 	if p.pl == nil {
 		return
 	}
-	if p.grace > 0 {
-		p.grace--
-		if n.App == cast.ReceiverPackage && n.State == "playing" {
-			p.grace = 0
-		}
-		return
-	}
-	if !cast.Finished(n) {
-		return
-	}
-	if n.App != cast.ReceiverPackage {
+	advance, left := p.pl.Observe(n)
+	if left {
 		p.stop("left the player")
-		return
+	} else if advance {
+		p.next()
 	}
-	p.next()
 }
 
 func (p *player) next() {
@@ -156,7 +149,6 @@ func (p *player) next() {
 		p.stop("finished")
 		return
 	}
-	p.grace = 3
 	p.announce()
 }
 
@@ -182,16 +174,16 @@ func (p *player) status() string {
 
 // screenshot saves a PNG under ~/Pictures/tv and remembers it for `view`.
 func (p *player) screenshot() tea.Cmd {
-	if p.rc == nil {
-		p.log(styleErr.Render("  shot needs the companion app: run tv setup"))
+	sh, err := cli.NeedAddon[device.Screenshotter](p.dev, "screenshots")
+	if err != nil {
+		p.log(styleErr.Render("  " + err.Error()))
 		return nil
 	}
-	rc := p.rc
 	return func() tea.Msg {
 		t0 := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		png, err := rc.Screenshot(ctx)
+		png, err := sh.Screenshot(ctx)
 		if err != nil {
 			return resultMsg{cmd: "shot", err: err, took: time.Since(t0)}
 		}

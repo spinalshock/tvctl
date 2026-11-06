@@ -24,7 +24,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -32,6 +31,8 @@ import (
 	"time"
 
 	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/omAthalye/tvctl/internal/netx"
+	"github.com/omAthalye/tvctl/internal/wol"
 )
 
 const (
@@ -54,6 +55,8 @@ type Client struct {
 	MAC    string
 	Token  string
 	http   *http.Client
+
+	companionToken string // the companion app's pairing token, if installed
 }
 
 // New builds a client. The TLS config skips verification because the TV
@@ -81,7 +84,23 @@ func (c *Client) Info() device.Info {
 	if id == "" {
 		id = c.Host
 	}
-	return device.Info{ID: id, Name: c.Name, Brand: brand, Host: c.Host}
+	return device.Info{ID: id, Name: c.Name, Brand: brand, Host: c.Host, MAC: c.MAC}
+}
+
+// name is what errors call this TV: its name, else its address.
+func (c *Client) name() string {
+	if c.Name != "" {
+		return c.Name
+	}
+	return c.Host
+}
+
+// Asleep is one TCP probe of the remote service. Fire TV stops that
+// service when idle even while on, so "asleep" here means "needs the
+// DIAL kick and wake key that Wake sends", which is harmless when the TV
+// was merely idle.
+func (c *Client) Asleep(context.Context) bool {
+	return !netx.PortOpen(net.JoinHostPort(c.Host, fmt.Sprint(apiPort)))
 }
 
 func (c *Client) base() string {
@@ -95,14 +114,14 @@ func (c *Client) base() string {
 // under a second.
 func (c *Client) ensureServer(ctx context.Context) error {
 	addr := net.JoinHostPort(c.Host, fmt.Sprint(apiPort))
-	if portOpen(addr) {
+	if netx.PortOpen(addr) {
 		return nil
 	}
 	if err := dialLaunch(ctx, c.Host, "FireTVRemote", ""); err != nil {
-		return fmt.Errorf("TV not reachable at %s (asleep, off, or wrong address): %w", c.Host, err)
+		return device.Failf("%s is off or unreachable", c.name()).Note(c.Host).Because(err)
 	}
 	for i := 0; i < 10; i++ {
-		if portOpen(addr) {
+		if netx.PortOpen(addr) {
 			return nil
 		}
 		select {
@@ -111,26 +130,13 @@ func (c *Client) ensureServer(ctx context.Context) error {
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	return errors.New("remote service did not start on :8080")
-}
-
-func portOpen(addr string) bool {
-	conn, err := net.DialTimeout("tcp", addr, 700*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
+	return device.Failf("%s's remote service didn't start", c.name())
 }
 
 // apiError is what the TV returns for every failure: {"description": "..."}.
 type apiError struct {
 	Description string `json:"description"`
 }
-
-// ErrAsleep is returned by passive calls when the TV's remote service is
-// not listening, which is what a TV in standby looks like from the LAN.
-var ErrAsleep = errors.New("TV is asleep")
 
 type passiveKey struct{}
 
@@ -147,8 +153,8 @@ func Passive(ctx context.Context) context.Context {
 // and turns non-2xx into a readable error carrying the TV's own description.
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
 	if ctx.Value(passiveKey{}) != nil {
-		if !portOpen(net.JoinHostPort(c.Host, fmt.Sprint(apiPort))) {
-			return ErrAsleep
+		if !netx.PortOpen(net.JoinHostPort(c.Host, fmt.Sprint(apiPort))) {
+			return device.ErrAsleep
 		}
 	} else if err := c.ensureServer(ctx); err != nil {
 		return err
@@ -187,9 +193,9 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 			e.Description = http.StatusText(resp.StatusCode)
 		}
 		if resp.StatusCode == 403 && c.Token == "" {
-			return fmt.Errorf("not paired with %s: run `tv pair`", c.Host)
+			return device.Failf("not paired with %s", c.name()).Note("run tv pair")
 		}
-		return fmt.Errorf("%s %s: %s (HTTP %d)", method, path, e.Description, resp.StatusCode)
+		return device.Fail(e.Description).Notef("%s %s, HTTP %d", method, path, resp.StatusCode)
 	}
 	if out != nil && len(raw) > 0 {
 		return json.Unmarshal(raw, out)
@@ -197,25 +203,38 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	return nil
 }
 
-// Pair runs the on-screen PIN handshake. The TV shows a 4-digit PIN; ask()
-// returns what the user read. On success the token is stored on the client
-// and returned for the config store. friendlyName is what the TV's dialog
-// shows ("To pair with <name>...").
+// Pair runs the on-screen PIN handshake interactively: ShowPIN, then ask()
+// for what the user read, then VerifyPIN. Hosts without a user at hand
+// (the TUI, a voice assistant) call the two halves as separate commands.
 func (c *Client) Pair(ctx context.Context, ask func(prompt string) (string, error)) (string, error) {
-	c.Token = ""
-	if err := c.do(ctx, http.MethodPost, "/v1/FireTV/pin/display", map[string]string{"friendlyName": friendlyName()}, nil); err != nil {
+	if err := c.ShowPIN(ctx); err != nil {
 		return "", err
 	}
 	pin, err := ask("PIN shown on the TV")
 	if err != nil {
 		return "", err
 	}
+	return c.VerifyPIN(ctx, pin)
+}
+
+// ShowPIN asks the TV to display a 4-digit PIN. friendlyName is what the
+// dialog shows ("To pair with <name>...").
+func (c *Client) ShowPIN(ctx context.Context) error {
+	c.Token = ""
+	return c.do(ctx, http.MethodPost, "/v1/FireTV/pin/display", map[string]string{"friendlyName": friendlyName()}, nil)
+}
+
+// VerifyPIN completes pairing. It is a plain request with no session to
+// keep open, so it may run in a different process from ShowPIN. On success
+// the token is stored on the client and returned for the config store.
+func (c *Client) VerifyPIN(ctx context.Context, pin string) (string, error) {
+	c.Token = ""
 	var res apiError // reuse: success also comes back as {"description": token}
 	if err := c.do(ctx, http.MethodPost, "/v1/FireTV/pin/verify", map[string]string{"pin": pin}, &res); err != nil {
 		return "", err
 	}
 	if res.Description == "" || len(res.Description) < 8 {
-		return "", fmt.Errorf("pairing rejected: %q", res.Description)
+		return "", device.Fail("pairing rejected").Notef("%q", res.Description)
 	}
 	c.Token = res.Description
 	return c.Token, nil
@@ -256,7 +275,7 @@ func (c *Client) Key(ctx context.Context, k device.Key) error {
 	}
 	a, ok := keyActions[k]
 	if !ok {
-		return fmt.Errorf("unknown key %q", k)
+		return device.Failf("%s has no %s key", c.name(), k)
 	}
 	return c.do(ctx, http.MethodPost, "/v1/FireTV?action="+a, nil, nil)
 }
@@ -329,7 +348,7 @@ func (c *Client) Status(ctx context.Context) (map[string]any, error) {
 // from network standby.
 func (c *Client) Wake(ctx context.Context) error {
 	if c.MAC != "" {
-		_ = sendMagicPacket(c.MAC)
+		_ = wol.Send(c.MAC)
 	}
 	if err := c.ensureServer(ctx); err != nil {
 		return err

@@ -1,22 +1,34 @@
 // Package receiver is the Go client for the companion app's HTTP API
-// (receiver/ in this repo). Plain HTTP on the LAN with an X-Token header.
+// (receiver/ in this repo): plain HTTP on the LAN with an X-Token header.
+// It speaks in device's types, so the driver that composes it in has
+// nothing to translate. The companion app is an Android app; the drivers
+// of Android-based TVs are the ones that use this package.
 package receiver
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/omAthalye/tvctl/internal/android"
+	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/omAthalye/tvctl/internal/netx"
 )
 
-const Port = 8434
+const (
+	Port = 8434
+	// Package is the companion app's Android package id: what it reports
+	// as itself in now-playing documents, and what an installer launches.
+	Package = "dev.tvctl.receiver"
+)
 
 type Client struct {
 	Host  string
@@ -38,39 +50,9 @@ type Status struct {
 	Caps    map[string]bool `json:"caps"`
 }
 
-// Now is the now-playing document. Position is a snapshot; callers
-// extrapolate with Speed and UpdatedMs when they want a ticking clock.
-type Now struct {
-	Foreground *string `json:"foreground"`
-	Source     *string `json:"source"`
-	App        string  `json:"app,omitempty"`
-	Title      *string `json:"title,omitempty"`
-	Artist     *string `json:"artist,omitempty"`
-	Album      *string `json:"album,omitempty"`
-	State      string  `json:"state"`
-	PositionMs int64   `json:"position_ms"`
-	DurationMs int64   `json:"duration_ms"`
-	Speed      float64 `json:"speed"`
-	UpdatedMs  int64   `json:"updated_ms"`
-}
-
-// Event is one message from the /events socket.
-type Event struct {
-	Type    string          `json:"type"`
-	Now     *Now            `json:"now,omitempty"`
-	Package *string         `json:"package,omitempty"`
-	Open    *bool           `json:"open,omitempty"`
-	Raw     json.RawMessage `json:"-"`
-}
-
 // Reachable reports whether the receiver answers on its port at all.
 func (c *Client) Reachable() bool {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(c.Host, fmt.Sprint(Port)), 700*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
+	return netx.PortOpen(net.JoinHostPort(c.Host, fmt.Sprint(Port)))
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
@@ -97,7 +79,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("receiver: %w", err)
+		return device.Fail("the companion app didn't answer").Because(err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
@@ -109,7 +91,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		if e.Error == "" {
 			e.Error = http.StatusText(resp.StatusCode)
 		}
-		return fmt.Errorf("receiver: %s", e.Error)
+		return device.Fail(e.Error).Note("companion app")
 	}
 	if out != nil {
 		if b, ok := out.(*[]byte); ok {
@@ -145,14 +127,15 @@ func (c *Client) Pair(ctx context.Context, ask func(string) (string, error)) (st
 		return "", err
 	}
 	if res.Token == "" {
-		return "", errors.New("pairing returned no token")
+		return "", device.Fail("the companion app returned no token")
 	}
 	c.Token = res.Token
 	return res.Token, nil
 }
 
-func (c *Client) Now(ctx context.Context) (*Now, error) {
-	var n Now
+// Playing is the now-playing document for whatever app is in front.
+func (c *Client) Playing(ctx context.Context) (*device.Playing, error) {
+	var n device.Playing
 	if err := c.do(ctx, http.MethodGet, "/now", nil, &n); err != nil {
 		return nil, err
 	}
@@ -184,86 +167,53 @@ func (c *Client) startish(ctx context.Context, path string, body any) (bool, err
 	return res.NeedsForeground, nil
 }
 
-// Toast shows a card for a few seconds. pos is a corner or edge
-// ("top-right" default, "bottom-left", "top", …); "" keeps the default.
-func (c *Client) Toast(ctx context.Context, text string, long bool, pos string) error {
-	return c.do(ctx, http.MethodPost, "/toast", map[string]any{"text": text, "long": long, "pos": pos}, nil)
+// Toast shows a card for a few seconds.
+func (c *Client) Toast(ctx context.Context, text string, o device.ToastOpts) error {
+	return c.do(ctx, http.MethodPost, "/toast", map[string]any{"text": text, "long": o.Long, "pos": o.Pos}, nil)
 }
 
-// InputState is what the TV's focused text field holds, read by the
-// companion app (the remote protocol can't tell a placeholder from text).
-// Prompt and Step come from keyboards that title and count their fields
-// (Amazon's setup keypad: "Enter DNS 1", "4 of 5"). Key changes whenever
-// focus moves to a different field. Text is empty while the field shows its
-// hint, and always for passwords.
-type InputState struct {
-	Open     bool   `json:"open"`
-	Prompt   string `json:"prompt"`
-	Step     string `json:"step"`
-	Hint     string `json:"hint"`
-	Text     string `json:"text"`
-	Password bool   `json:"password"`
-	Key      string `json:"key"`
-}
-
-// Input reads the TV's focused text field.
-func (c *Client) Input(ctx context.Context) (*InputState, error) {
-	var st InputState
+// Field reads the TV's focused text field.
+func (c *Client) Field(ctx context.Context) (*device.Field, error) {
+	var st device.Field
 	if err := c.do(ctx, http.MethodGet, "/input", nil, &st); err != nil {
 		return nil, err
 	}
 	return &st, nil
 }
 
-// HomeTile is one tile on the TV's home dashboard: an app (by package) or
-// an input ("hdmi1".."hdmi4"). Label and Installed are filled in by the TV.
-type HomeTile struct {
-	Type      string `json:"type"`
-	ID        string `json:"id"`
-	Label     string `json:"label,omitempty"`
-	Installed bool   `json:"installed,omitempty"`
-}
-
-// HomeState is the home dashboard's settings on the TV.
-type HomeState struct {
-	Enabled   bool       `json:"enabled"`
-	Tiles     []HomeTile `json:"tiles"`
-	Wallpaper bool       `json:"wallpaper"`
-}
-
 // Home reads the dashboard's settings.
-func (c *Client) Home(ctx context.Context) (*HomeState, error) {
-	var st HomeState
+func (c *Client) Home(ctx context.Context) (*device.Dashboard, error) {
+	var st device.Dashboard
 	return &st, c.do(ctx, http.MethodGet, "/home", nil, &st)
 }
 
 // SetHome changes whether the dashboard replaces Amazon's home screen
 // (enabled nil: unchanged) and/or its tiles (nil: unchanged).
-func (c *Client) SetHome(ctx context.Context, enabled *bool, tiles []HomeTile) (*HomeState, error) {
+func (c *Client) SetHome(ctx context.Context, enabled *bool, tiles []device.Tile) (*device.Dashboard, error) {
 	body := map[string]any{}
 	if enabled != nil {
 		body["enabled"] = *enabled
 	}
 	if tiles != nil {
-		t := make([]HomeTile, len(tiles))
+		t := make([]device.Tile, len(tiles))
 		for i, x := range tiles {
-			t[i] = HomeTile{Type: x.Type, ID: x.ID}
+			t[i] = device.Tile{Type: x.Type, ID: x.ID}
 		}
 		body["tiles"] = t
 	}
-	var st HomeState
+	var st device.Dashboard
 	return &st, c.do(ctx, http.MethodPost, "/home", body, &st)
 }
 
 // SetWallpaper uploads an image as the dashboard's background.
-func (c *Client) SetWallpaper(ctx context.Context, img []byte) (*HomeState, error) {
-	var st HomeState
+func (c *Client) SetWallpaper(ctx context.Context, img []byte) (*device.Dashboard, error) {
+	var st device.Dashboard
 	return &st, c.do(ctx, http.MethodPost, "/home/wallpaper", img, &st)
 }
 
 // ClearWallpaper goes back to the built-in dark background.
-func (c *Client) ClearWallpaper(ctx context.Context) (*HomeState, error) {
-	var st HomeState
+func (c *Client) ClearWallpaper(ctx context.Context) (*device.Dashboard, error) {
+	var st device.Dashboard
 	return &st, c.do(ctx, http.MethodDelete, "/home/wallpaper", nil, &st)
 }
 
@@ -271,7 +221,11 @@ func (c *Client) ClearWallpaper(ctx context.Context) (*HomeState, error) {
 // play, pause, toggle, stop, next, previous, seek (absolute ms), seek_by
 // (relative ms, negative to rewind).
 func (c *Client) Control(ctx context.Context, action string, positionMs int64) error {
-	return c.do(ctx, http.MethodPost, "/control", map[string]any{"action": action, "position_ms": positionMs}, nil)
+	err := c.do(ctx, http.MethodPost, "/control", map[string]any{"action": action, "position_ms": positionMs}, nil)
+	if err != nil && strings.Contains(err.Error(), "nothing is playing") {
+		return device.ErrNothingPlaying
+	}
+	return err
 }
 
 // Screenshot returns PNG bytes.
@@ -285,13 +239,13 @@ func (c *Client) Screenshot(ctx context.Context) ([]byte, error) {
 
 // Events streams until ctx ends or the socket drops. Each message is
 // decoded and also kept raw for --json consumers.
-func (c *Client) Events(ctx context.Context, fn func(Event) error) error {
+func (c *Client) Events(ctx context.Context, fn func(device.Event) error) error {
 	hdr := http.Header{}
 	hdr.Set("X-Token", c.Token)
 	ws, _, err := websocket.Dial(ctx, "ws://"+net.JoinHostPort(c.Host, fmt.Sprint(Port))+"/events",
 		&websocket.DialOptions{HTTPHeader: hdr})
 	if err != nil {
-		return fmt.Errorf("receiver events: %w", err)
+		return device.Fail("the companion app's event stream didn't open").Because(err)
 	}
 	defer ws.CloseNow()
 	ws.SetReadLimit(1 << 20)
@@ -306,7 +260,7 @@ func (c *Client) Events(ctx context.Context, fn func(Event) error) error {
 		if string(data) == "pong" {
 			continue
 		}
-		var ev Event
+		var ev device.Event
 		if err := json.Unmarshal(data, &ev); err != nil {
 			continue
 		}
@@ -318,7 +272,7 @@ func (c *Client) Events(ctx context.Context, fn func(Event) error) error {
 }
 
 // Describe renders a now-playing document as one line for status bars.
-func (n *Now) Describe() string {
+func Describe(n *device.Playing) string {
 	if n == nil || n.Source == nil {
 		if n != nil && n.Foreground != nil {
 			return "idle · " + *n.Foreground
@@ -340,7 +294,7 @@ func (n *Now) Describe() string {
 	if sym == "" {
 		sym = n.State
 	}
-	return fmt.Sprintf("%s %s  %s  %s", sym, shortApp(n.App), title, pos)
+	return fmt.Sprintf("%s %s  %s  %s", sym, android.AppName(n.App), title, pos)
 }
 
 func clock(ms int64) string {
@@ -351,35 +305,9 @@ func clock(ms int64) string {
 	return fmt.Sprintf("%d:%02d", s/60, s%60)
 }
 
-func shortApp(pkg string) string {
-	known := map[string]string{
-		"com.netflix.ninja":         "Netflix",
-		"com.amazon.firetv.youtube": "YouTube",
-		"com.spotify.tv.android":    "Spotify",
-		"com.amazon.avod":           "Prime Video",
-		"dev.tvctl.receiver":        "tvctl",
-	}
-	if n, ok := known[pkg]; ok {
-		return n
-	}
-	return pkg
-}
-
-// OverlayOpts styles the on-screen text panel. Zero values mean "leave as
-// is" so a stream of appends doesn't keep restating the look.
-type OverlayOpts struct {
-	Title    string  // header line; "" hides it (only sent when HasTitle)
-	HasTitle bool    // Title is meaningful even when empty
-	Pos      string  // bottom (default), top, left, right, full
-	MaxLines int     // rows kept; older lines scroll off
-	Opacity  float64 // panel background, 0..1
-	Size     float64 // text size in sp
-	Width    float64 // fraction of screen for left/right panels
-}
-
 // Overlay shows the panel (creating it if needed) with these lines. With
 // appendMode the lines extend the buffer; otherwise they replace it.
-func (c *Client) Overlay(ctx context.Context, lines []string, appendMode bool, o OverlayOpts) error {
+func (c *Client) Overlay(ctx context.Context, lines []string, appendMode bool, o device.Panel) error {
 	body := map[string]any{"lines": lines, "append": appendMode}
 	if o.HasTitle {
 		body["title"] = o.Title
@@ -428,21 +356,18 @@ func (c *Client) DashClose(ctx context.Context) error {
 	return c.do(ctx, http.MethodDelete, "/dash", nil, nil)
 }
 
-// App is one launchable app as the receiver sees it. Unlike the TV's own
-// list, this includes built-ins (Prime Video, Appstore, Gallery), because
-// the receiver queries the launcher the way the home screen does.
-type App struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
-// Apps lists everything the launcher could start.
-func (c *Client) Apps(ctx context.Context) ([]App, error) {
+// Apps lists everything the launcher could start. Unlike the TV's own
+// list this includes built-ins, because the receiver asks the launcher
+// the way the home screen does.
+func (c *Client) Apps(ctx context.Context) ([]device.App, error) {
 	var out struct {
-		Apps []App `json:"apps"`
+		Apps []device.App `json:"apps"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/apps", nil, &out); err != nil {
 		return nil, err
+	}
+	for i := range out.Apps {
+		out.Apps[i].Installed = true
 	}
 	return out.Apps, nil
 }

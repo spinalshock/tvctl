@@ -28,6 +28,7 @@ class NowPlaying(private val ctx: Context, private val events: Events) {
     private val main = Handler(Looper.getMainLooper())
     private val listenerComponent = ComponentName(ctx, NowPlayingListener::class.java)
     private val controllers = ArrayList<MediaController>()
+    private val titles = VideoTitles { main.post { publish() } }
     private val callbacks = HashMap<MediaController, MediaController.Callback>()
 
     /** Foreground package as last reported by the accessibility service. */
@@ -137,10 +138,21 @@ class NowPlaying(private val ctx: Context, private val events: Events) {
         if (c != null) {
             val md = c.metadata
             val ps = c.playbackState
+            var title = (md?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: md?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE))?.takeIf { it.isNotBlank() }
+            var artist = (md?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: md?.getString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE))?.takeIf { it.isNotBlank() }
+            if (title == null) {
+                // SmartTube publishes a video started from a link before it
+                // knows the title, and only republishes on the next player
+                // event; the video id is there from the start, so look it up.
+                titles.get(md?.getString(MediaMetadata.METADATA_KEY_MEDIA_ID))?.let { (t, a) ->
+                    title = t
+                    if (artist == null) artist = a
+                }
+            }
             o.put("source", "session")
                 .put("app", c.packageName)
-                .put("title", md?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: md?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE) ?: JSONObject.NULL)
-                .put("artist", md?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: md?.getString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE) ?: JSONObject.NULL)
+                .put("title", title ?: JSONObject.NULL)
+                .put("artist", artist ?: JSONObject.NULL)
                 .put("album", md?.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: JSONObject.NULL)
                 .put("duration_ms", md?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L)
                 .put("state", stateName(ps?.state))
@@ -185,3 +197,44 @@ class NowPlaying(private val ctx: Context, private val events: Events) {
  * way an app can be granted the access that MediaSessionManager checks.
  */
 class NowPlayingListener : NotificationListenerService()
+
+/**
+ * YouTube titles by video id, from YouTube's public oEmbed endpoint (no key,
+ * no account). get() answers from the cache or returns null and fetches in
+ * the background, calling [found] once the title is in.
+ */
+class VideoTitles(private val found: () -> Unit) {
+    private val cache = object : LinkedHashMap<String, Pair<String, String?>>(16, 0.75f, true) {
+        override fun removeEldestEntry(e: MutableMap.MutableEntry<String, Pair<String, String?>>) = size > 32
+    }
+    private val pending = HashSet<String>()
+    private val id = Regex("^[A-Za-z0-9_-]{11}$")
+
+    @Synchronized
+    fun get(videoId: String?): Pair<String, String?>? {
+        if (videoId == null || !id.matches(videoId)) return null
+        cache[videoId]?.let { return it }
+        if (pending.add(videoId)) Thread { fetch(videoId) }.start()
+        return null
+    }
+
+    private fun fetch(videoId: String) {
+        val hit = runCatching {
+            val u = java.net.URL("https://www.youtube.com/oembed?format=json&url=https://www.youtube.com/watch?v=$videoId")
+            val c = u.openConnection() as java.net.HttpURLConnection
+            c.connectTimeout = 5000
+            c.readTimeout = 5000
+            try {
+                val j = JSONObject(c.inputStream.bufferedReader().use { it.readText() })
+                j.getString("title") to j.optString("author_name").takeIf { it.isNotBlank() }
+            } finally {
+                c.disconnect()
+            }
+        }.getOrNull()
+        synchronized(this) {
+            pending.remove(videoId)
+            if (hit != null) cache[videoId] = hit
+        }
+        if (hit != null) found()
+    }
+}

@@ -3,7 +3,6 @@ package cli
 import (
 	"bufio"
 	"context"
-	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -14,7 +13,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 
-	"github.com/omAthalye/tvctl/internal/receiver"
+	"github.com/omAthalye/tvctl/internal/device"
 )
 
 // overlayFlags are shared by `watch` and `overlay`: how the panel looks.
@@ -36,8 +35,8 @@ func (f *overlayFlags) bind(c *cobra.Command) {
 	c.Flags().Float64Var(&f.width, "width", 0.45, "fraction of the screen for left/right panels")
 }
 
-func (f *overlayFlags) opts(titleSet bool) receiver.OverlayOpts {
-	return receiver.OverlayOpts{
+func (f *overlayFlags) opts(titleSet bool) device.Panel {
+	return device.Panel{
 		Title: f.title, HasTitle: titleSet || f.title != "",
 		Pos: f.pos, MaxLines: f.lines, Opacity: f.opacity, Size: f.size, Width: f.width,
 	}
@@ -56,11 +55,12 @@ func (e *cmds) watch() *cobra.Command {
 	var f overlayFlags
 	var keep bool
 	c := &cobra.Command{
-		Use:   "watch [flags] [-- command [args...]]",
-		Short: "Mirror a command's output (or stdin) onto the TV",
+		Use:         "watch [flags] [-- command [args...]]",
+		Short:       "Mirror a command's output (or stdin) onto the TV",
+		Annotations: meta(needsCompanion, "none"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			titleSet := cmd.Flags().Changed("title")
-			return e.runRC(func(s *session, args []string) error {
+			return e.run(func(s *session, args []string) error {
 				return e.watchRun(s, args, &f, titleSet, keep)
 			})(cmd, args)
 		},
@@ -73,7 +73,11 @@ func (e *cmds) watch() *cobra.Command {
 }
 
 func (e *cmds) watchRun(s *session, args []string, f *overlayFlags, titleSet, keep bool) error {
-	cx, rc := s.ctx, s.rc
+	rc, err := NeedAddon[device.Overlayer](s.dev, "overlays")
+	if err != nil {
+		return err
+	}
+	cx := s.ctx
 	{
 		{
 			// Source: the child's combined output, or our stdin.
@@ -91,7 +95,7 @@ func (e *cmds) watchRun(s *session, args []string, f *overlayFlags, titleSet, ke
 				src = pr
 			} else {
 				if fi, _ := os.Stdin.Stat(); fi != nil && fi.Mode()&os.ModeCharDevice != 0 {
-					return errors.New("nothing to watch: pipe something in, or give a command after --")
+					return device.Fail("nothing to watch").Note("pipe something in, or give a command after --")
 				}
 				src = os.Stdin
 			}
@@ -137,7 +141,7 @@ func (e *cmds) watchRun(s *session, args []string, f *overlayFlags, titleSet, ke
 				if len(batch) > f.lines {
 					batch = batch[len(batch)-f.lines:]
 				}
-				err := rc.Overlay(cx, batch, true, receiver.OverlayOpts{})
+				err := rc.Overlay(cx, batch, true, device.Panel{})
 				batch = batch[:0]
 				return err
 			}
@@ -186,26 +190,31 @@ func (e *exitError) Error() string { return "command exited with status " + strc
 func (e *cmds) overlay() *cobra.Command {
 	var f overlayFlags
 	c := &cobra.Command{
-		Use:   "overlay <text>... | off",
-		Short: "Pin text on the TV screen (overlay off removes it)",
-		Args:  cobra.MinimumNArgs(1),
+		Use:         "overlay <text>... | off",
+		Short:       "Pin text on the TV screen (overlay off removes it)",
+		Annotations: meta(needsCompanion, ""),
+		Args:        cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			titleSet, linesSet := cmd.Flags().Changed("title"), cmd.Flags().Changed("lines")
-			return e.runRC(func(s *session, args []string) error {
+			return e.run(func(s *session, args []string) error {
+				ov, err := NeedAddon[device.Overlayer](s.dev, "overlays")
+				if err != nil {
+					return err
+				}
 				if len(args) == 1 && (args[0] == "off" || args[0] == "hide") {
-					if err := s.rc.OverlayHide(s.ctx); err != nil {
+					if err := ov.OverlayHide(s.ctx); err != nil {
 						return err
 					}
-					return e.ok("overlay removed", map[string]any{"visible": false})
+					return e.ok("", map[string]any{"visible": false})
 				}
 				lines := strings.Split(strings.Join(args, " "), "\n")
 				if !linesSet {
 					f.lines = len(lines)
 				}
-				if err := s.rc.Overlay(s.ctx, lines, false, f.opts(titleSet)); err != nil {
+				if err := ov.Overlay(s.ctx, lines, false, f.opts(titleSet)); err != nil {
 					return err
 				}
-				return e.ok("ok", map[string]any{"visible": true, "lines": len(lines)})
+				return e.ok("", map[string]any{"visible": true, "lines": len(lines)})
 			})(cmd, args)
 		},
 	}

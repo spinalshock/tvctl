@@ -146,7 +146,10 @@ func (c *console) done(cmd, out string, err error, took time.Duration) {
 	c.running = ""
 	c.say(stylePrompt.Render("› ") + styleBold.Render(cmd) + styleDim.Render("   "+fmtSecs(took)))
 	out = strings.TrimRight(out, "\n")
-	if err != nil && out == "" {
+	if err != nil {
+		// The plain output is the one-sentence form (what an assistant
+		// reads aloud); here a person is debugging, so show the whole
+		// cause chain instead.
 		out = err.Error()
 	}
 	for _, l := range strings.Split(out, "\n") {

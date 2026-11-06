@@ -3,13 +3,13 @@ package firetv
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"net"
 	"net/http"
 	"time"
 
 	"github.com/coder/websocket"
 
+	"github.com/omAthalye/tvctl/internal/device"
 	"github.com/omAthalye/tvctl/internal/tts"
 )
 
@@ -56,7 +56,7 @@ func (c *Client) Say(ctx context.Context, phrase string) error {
 	wsURL := "wss://" + net.JoinHostPort(c.Host, "9090") + "/"
 	ws, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPClient: hc, HTTPHeader: hdr})
 	if err != nil {
-		return fmt.Errorf("voice socket: %w", err)
+		return device.Fail("the TV's voice channel didn't open").Because(err)
 	}
 
 	const frame = tts.SampleRate * tts.Channels * (tts.BitDepth / 8) / 10 // 100 ms
@@ -73,7 +73,7 @@ func (c *Client) Say(ctx context.Context, phrase string) error {
 		}
 		if err := ws.Write(ctx, websocket.MessageBinary, pcm[off:end]); err != nil {
 			ws.Close(websocket.StatusInternalError, "write failed")
-			return fmt.Errorf("voice stream: %w", err)
+			return device.Fail("the voice stream to the TV broke off").Because(err)
 		}
 		select {
 		case <-ctx.Done():

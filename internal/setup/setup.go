@@ -1,7 +1,9 @@
-// Package setup installs the companion app on a Fire TV and grants it the
-// permissions Fire OS has no settings screen for. It is the only place the
-// ADB protocol is used, and the only step that asks the user to touch the
-// TV's developer settings. Everything afterwards is plain HTTP.
+// Package setup installs the companion app on an Android-based TV over
+// ADB and grants it the permissions Android offers no settings screen
+// for. It is the only place the ADB protocol is used, and the only step
+// that asks the user to touch the TV's developer settings. Everything
+// afterwards is plain HTTP. Drivers of Android-based TVs expose it as
+// device.Installer.
 package setup
 
 import (
@@ -16,6 +18,8 @@ import (
 
 	"github.com/omAthalye/tvctl/internal/adb"
 	"github.com/omAthalye/tvctl/internal/config"
+	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/omAthalye/tvctl/internal/netx"
 	"github.com/omAthalye/tvctl/internal/receiver"
 )
 
@@ -23,7 +27,7 @@ import (
 var apk []byte
 
 const (
-	pkg      = "dev.tvctl.receiver"
+	pkg      = receiver.Package
 	adbPort  = "5555"
 	a11ySvc  = pkg + "/.TvctlAccessibilityService"
 	listener = pkg + "/.NowPlayingListener"
@@ -38,20 +42,20 @@ type Options struct {
 	Launch func(ctx context.Context, pkg string) error
 }
 
-// Run performs the whole flow against the device in e and returns the
+// Run performs the whole flow against the TV at host and returns the
 // receiver pairing token to persist. An existing, still-valid token is kept
 // so re-running setup to update the app doesn't ask for a new PIN.
-func Run(ctx context.Context, e config.Entry, o Options) (string, error) {
+func Run(ctx context.Context, host, existingToken string, o Options) (string, error) {
 	say := func(f string, a ...any) { fmt.Fprintf(o.Out, f+"\n", a...) }
-	addr := net.JoinHostPort(e.Host, adbPort)
+	addr := net.JoinHostPort(host, adbPort)
 
 	// 1. Wait for debugging to be switched on.
-	if !portOpen(addr) {
+	if !netx.PortOpen(addr) {
 		say("On the TV, turn on debugging once:")
-		say("  Settings › My Fire TV › Developer Options › ADB debugging › ON")
+		say("  Settings › My Fire TV (or Device Preferences) › Developer Options › ADB debugging › ON")
 		say("  (No Developer Options? In About, press Select 7 times on the device name.)")
 		say("Waiting for the TV to accept connections on port %s …", adbPort)
-		for !portOpen(addr) {
+		for !netx.PortOpen(addr) {
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
@@ -134,7 +138,7 @@ func Run(ctx context.Context, e config.Entry, o Options) (string, error) {
 	// on screen (an update shouldn't pause a movie). Starting it explicitly
 	// also clears Android's "stopped" state so the boot broadcast arrives.
 	_, _ = conn.Shell(ctx, "am start-foreground-service -n "+pkg+"/.ReceiverService")
-	rc := receiver.New(e.Host, "")
+	rc := receiver.New(host, "")
 	say("Waiting for the receiver to come up …")
 	for i := 0; i < 20 && !rc.Reachable(); i++ {
 		time.Sleep(500 * time.Millisecond)
@@ -149,15 +153,15 @@ func Run(ctx context.Context, e config.Entry, o Options) (string, error) {
 		}
 	}
 	if !rc.Reachable() {
-		return "", fmt.Errorf("receiver did not start on :%d", receiver.Port)
+		return "", device.Failf("the companion app didn't start").Notef("nothing listening on :%d", receiver.Port)
 	}
 
 	// 6. Pair with it, same PIN dance as the TV itself, unless the stored
 	// token still works.
-	tok := e.ReceiverToken
+	tok := existingToken
 	if tok != "" {
 		rc.Token = tok
-		if _, err := rc.Now(ctx); err != nil {
+		if _, err := rc.Playing(ctx); err != nil {
 			tok = ""
 		} else {
 			say("Existing pairing still valid.")
@@ -178,13 +182,4 @@ func Run(ctx context.Context, e config.Entry, o Options) (string, error) {
 	}
 	say("Done. You can turn ADB debugging back off; tvctl no longer needs it.")
 	return tok, nil
-}
-
-func portOpen(addr string) bool {
-	c, err := net.DialTimeout("tcp", addr, 700*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	c.Close()
-	return true
 }

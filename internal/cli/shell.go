@@ -1,3 +1,5 @@
+//go:build !lite
+
 package cli
 
 import (
@@ -12,6 +14,7 @@ import (
 
 	"github.com/omAthalye/tvctl/internal/adb"
 	"github.com/omAthalye/tvctl/internal/config"
+	"github.com/omAthalye/tvctl/internal/device"
 )
 
 // shell runs one command on the TV over ADB with tvctl's own key, the one
@@ -35,10 +38,11 @@ func (e *cmds) adbConn(s *session) (*adb.Conn, error) {
 
 func (e *cmds) shell() *cobra.Command {
 	return &cobra.Command{
-		Use:    "shell <command>...",
-		Short:  "Run a shell command on the TV over ADB (needs ADB debugging on)",
-		Hidden: true,
-		Args:   cobra.MinimumNArgs(1),
+		Use:         "shell <command>...",
+		Short:       "Run a shell command on the TV over ADB (needs ADB debugging on)",
+		Hidden:      true,
+		Annotations: meta("", "none"),
+		Args:        cobra.MinimumNArgs(1),
 		RunE: e.run(func(s *session, args []string) error {
 			conn, err := e.adbConn(s)
 			if err != nil {
@@ -59,10 +63,11 @@ func (e *cmds) shell() *cobra.Command {
 // like shell: a maintenance tool. Needs ADB debugging on.
 func (e *cmds) install() *cobra.Command {
 	return &cobra.Command{
-		Use:    "install <file.apk>",
-		Short:  "Install or update an APK on the TV over ADB (needs ADB debugging on)",
-		Hidden: true,
-		Args:   cobra.ExactArgs(1),
+		Use:         "install <file.apk>",
+		Short:       "Install or update an APK on the TV over ADB (needs ADB debugging on)",
+		Hidden:      true,
+		Annotations: meta("", "none"),
+		Args:        cobra.ExactArgs(1),
 		RunE: e.run(func(s *session, args []string) error {
 			apk, err := os.ReadFile(args[0])
 			if err != nil {
@@ -79,9 +84,9 @@ func (e *cmds) install() *cobra.Command {
 			}
 			out = strings.TrimSpace(out)
 			if !strings.Contains(out, "Success") {
-				return fmt.Errorf("install failed: %s", out)
+				return device.Fail("install failed").Note(out)
 			}
-			return e.ok(fmt.Sprintf("installed %s (%.1f MB)", filepath.Base(args[0]), float64(len(apk))/1e6), map[string]any{"apk": args[0]})
+			return e.done(fmt.Sprintf("installed %s (%.1f MB)", filepath.Base(args[0]), float64(len(apk))/1e6), map[string]any{"apk": args[0]})
 		}),
 	}
 }

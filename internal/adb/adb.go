@@ -1,5 +1,5 @@
 // Package adb is a minimal client for the ADB wire protocol over TCP, so
-// `tv setup` can install the companion app and grant its permissions
+// `tv companion` can install the companion app and grant its permissions
 // without the user installing Android's platform tools. It talks to the
 // device's adbd directly; there is no adb server in the picture.
 //

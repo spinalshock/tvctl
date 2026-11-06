@@ -10,7 +10,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/omAthalye/tvctl/internal/cli"
-	"github.com/omAthalye/tvctl/internal/device"
 )
 
 // builtins are the prompt-only words the TUI handles itself; everything
@@ -55,17 +54,18 @@ func (m *model) resolve(line string) (argv []string, local func() tea.Cmd) {
 			return nil, func() tea.Cmd { return m.player.chooseFiles("wallpaper") }
 		}
 		return append([]string{"home", "wallpaper"}, fields[1:]...), nil // wallpaper off
-	case "next":
-		if m.player.active() {
+	case "next", "prev":
+		if head == "next" && m.player.active() {
 			return nil, func() tea.Cmd { m.player.next(); return nil }
 		}
+		return []string{"seek", head}, nil
 	case "stop":
 		if m.player.active() {
 			return nil, func() tea.Cmd { m.player.stop("stopped"); return nil }
 		}
-	case "play":
+	case "home":
 		if len(fields) == 1 {
-			return []string{"resume"}, nil
+			return []string{"key", "home"}, nil // the remote's Home; `home on|off|add…` manage the dashboard
 		}
 	case "shot":
 		return nil, func() tea.Cmd { return tea.Batch(m.console.begin("shot"), m.player.screenshot()) }
@@ -108,10 +108,19 @@ func (m *model) isVerb(word string) bool {
 	return m.verbWords[word]
 }
 
-// noAsk is the TUI's answer to a command that wants to prompt (pairing):
-// not here. Pairing is a one-time terminal job.
+// noAsk is the TUI's answer to a command that wants to prompt: nobody can
+// type an answer here, so commands take their non-interactive path (pair
+// shows the PIN and `pin <digits>` finishes it). Reaching this is a bug.
 func noAsk(prompt string) (string, error) {
-	return "", errors.New(prompt + ": run this one as `tv pair` in a terminal")
+	return "", errors.New(prompt + ": can't be asked here")
+}
+
+// choices is cli.Choices, built once.
+func (m *model) choices() map[string][]string {
+	if m.verbChoices == nil {
+		m.verbChoices = cli.Choices()
+	}
+	return m.verbChoices
 }
 
 // help renders cobra's own help for the root or one verb into the
@@ -131,10 +140,11 @@ func (m *model) help(args []string) {
 		say("  <app>             open it: " + strings.Join(cli.AliasNames(), " · ") + ", or any prefix of an app's name")
 		say("  <app> <words>     search inside that app (netflix dark); youtube <words> plays the top result")
 		say("  <link>            open it (YouTube links play directly)")
+		say("  home              press Home on the TV (home on|off|add|remove manage the dashboard)")
 		say("  keys              remote mode: arrow keys go to the TV until esc")
 		say("  files             pick files or a folder in yazi, play them on the TV in order")
 		say("  wallpaper         pick an image in yazi, set it as the home dashboard's background")
-		say("  pause · resume · toggle · stop · next · prev · seek +30   media controls for any app")
+		say("  play · pause · stop · next · prev · seek +30   media controls for any app (play <words> plays YouTube)")
 		say("  next · stop       with a playlist running: skip to the next file · end the playlist")
 		say("  shot · view       screenshot the TV · open the last one in yazi")
 		say("  help <command>    details for one command")
@@ -161,13 +171,7 @@ func (m *model) complete(val string) []match {
 			cands = append(cands, a.Name)
 		}
 	default:
-		switch strings.ToLower(fields[0]) {
-		case "vol":
-			cands = []string{"up", "down", "mute"}
-		case "key":
-			for _, k := range device.AllKeys {
-				cands = append(cands, string(k))
-			}
+		switch head := strings.ToLower(fields[0]); head {
 		case "open", "app":
 			cands = append(cands, cli.AliasNames()...)
 			for _, a := range m.apps {
@@ -175,6 +179,8 @@ func (m *model) complete(val string) []match {
 			}
 		case "help":
 			cands = m.verbs
+		default:
+			cands = m.choices()[head] // key names, vol up|down|mute, input hdmi1…
 		}
 	}
 	sort.Strings(cands)

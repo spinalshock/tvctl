@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/omAthalye/tvctl/internal/cli"
-	"github.com/omAthalye/tvctl/internal/receiver"
+	"github.com/omAthalye/tvctl/internal/device"
 )
 
 // TestResolve pins the precedence rule: built-in, alias (bare opens, with
@@ -25,6 +25,8 @@ func TestResolve(t *testing.T) {
 		"Sony LIV":              {"open", "Sony LIV"},
 		"app netflix":           {"app", "netflix"},
 		"wallpaper off":         {"home", "wallpaper", "off"},
+		"home":                  {"key", "home"},
+		"home on":               {"home", "on"},
 	}
 	for in, want := range cases {
 		got, local := m.resolve(in)
@@ -60,8 +62,11 @@ func TestFuzzy(t *testing.T) {
 func TestNowBar(t *testing.T) {
 	title := "Taambdi Chaamdi"
 	src := "session"
-	n := newNowBar(true)
-	n.set(&receiver.Now{App: "com.amazon.firetv.youtube", Source: &src, Title: &title,
+	n := newNowBar(true, "")
+	n.name = func(id string) string { // the driver's job in the real app
+		return map[string]string{"com.amazon.firetv.youtube": "YouTube", "com.netflix.ninja": "Netflix"}[id]
+	}
+	n.set(&device.Playing{App: "com.amazon.firetv.youtube", Source: &src, Title: &title,
 		State: "playing", Speed: 1, PositionMs: 60_000, DurationMs: 240_000})
 	v := n.View(80)
 	if !strings.Contains(v, "YouTube") || !strings.Contains(v, title) {
@@ -73,7 +78,7 @@ func TestNowBar(t *testing.T) {
 	if !strings.Contains(v, "█") {
 		t.Errorf("no bar drawn: %q", v)
 	}
-	n.set(&receiver.Now{App: "com.netflix.ninja", Source: &src, State: "playing", Speed: 1, PositionMs: 5_000})
+	n.set(&device.Playing{App: "com.netflix.ninja", Source: &src, State: "playing", Speed: 1, PositionMs: 5_000})
 	v = n.View(80)
 	if !strings.Contains(v, "elapsed") || !strings.Contains(v, "╌") || !strings.Contains(v, "no title") {
 		t.Errorf("unknown duration: %q", v)

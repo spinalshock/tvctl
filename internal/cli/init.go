@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+
+	"github.com/omAthalye/tvctl/internal/device"
 )
 
 // init emits shell code that defines a short command, `tv` by default,
@@ -42,7 +44,7 @@ Then type  tv  for the TUI and  tv <command>  for everything else. Use
 			case "fish":
 				fmt.Fprintf(e.env.Out, fishInit, alias, bin, bin, alias)
 			default:
-				return fmt.Errorf("unknown shell %q (zsh, bash, fish)", args[0])
+				return device.Failf("unknown shell %s", args[0]).Note("zsh, bash or fish")
 			}
 			return nil
 		},

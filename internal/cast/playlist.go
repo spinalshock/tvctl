@@ -4,14 +4,13 @@
 //
 // Mechanics: one HTTP server on an ephemeral port bound to the interface
 // that reaches the TV, serving only the chosen files by index. The TV's
-// native player (companion app) is pointed at each URL in turn. Range
+// native player (device.MediaPlayer) is pointed at each URL in turn. Range
 // requests are honoured by Go's file server, which is what makes seeking
 // work on the TV side.
 package cast
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -23,15 +22,10 @@ import (
 	"sync"
 
 	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/receiver"
 )
 
-// ReceiverPackage is the companion app's package id, used to recognise
-// our own player in now-playing documents.
-const ReceiverPackage = "dev.tvctl.receiver"
-
-// videoExts is what Expand picks out of a directory. ExoPlayer handles
-// more, but these are the ones people actually have.
+// videoExts is what Expand picks out of a directory. Players handle more,
+// but these are the ones people actually have.
 var videoExts = map[string]bool{
 	".mp4": true, ".mkv": true, ".webm": true, ".mov": true, ".m4v": true,
 	".avi": true, ".ts": true, ".mp3": true, ".m4a": true, ".flac": true, ".aac": true, ".ogg": true, ".wav": true,
@@ -68,7 +62,7 @@ func Expand(paths []string) ([]string, error) {
 		out = append(out, inDir...)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("no media files selected")
+		return nil, device.Fail("no media files selected")
 	}
 	return out, nil
 }
@@ -76,17 +70,17 @@ func Expand(paths []string) ([]string, error) {
 // Playlist is a running session: server plus cursor.
 type Playlist struct {
 	Files []string
-	rc    *receiver.Client
-	dev   device.Device
+	mp    device.MediaPlayer
 	ln    net.Listener
 	srv   *http.Server
 	mu    sync.Mutex
 	idx   int
+	grace int // now-documents to ignore right after a start
 }
 
-// Start serves files and begins playing the first one.
-func Start(ctx context.Context, rc *receiver.Client, dev device.Device, files []string) (*Playlist, error) {
-	ip, err := localIPFor(rc.Host)
+// Start serves files to the TV at host and begins playing the first one.
+func Start(ctx context.Context, mp device.MediaPlayer, host string, files []string) (*Playlist, error) {
+	ip, err := localIPFor(host)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +88,7 @@ func Start(ctx context.Context, rc *receiver.Client, dev device.Device, files []
 	if err != nil {
 		return nil, err
 	}
-	p := &Playlist{Files: files, rc: rc, dev: dev, ln: ln, idx: -1}
+	p := &Playlist{Files: files, mp: mp, ln: ln, idx: -1}
 	mux := http.NewServeMux()
 	// Files are addressed by index, so odd characters in names never
 	// matter and nothing outside the chosen set is reachable.
@@ -118,24 +112,15 @@ func Start(ctx context.Context, rc *receiver.Client, dev device.Device, files []
 // Play points the TV at file i.
 func (p *Playlist) Play(ctx context.Context, i int) error {
 	if i < 0 || i >= len(p.Files) {
-		return errors.New("playlist: index out of range")
+		return device.Fail("no such item in the playlist")
 	}
 	p.mu.Lock()
 	p.idx = i
+	p.grace = 3
 	p.mu.Unlock()
 	name := filepath.Base(p.Files[i])
 	title := strings.TrimSuffix(name, filepath.Ext(name))
-	url := fmt.Sprintf("http://%s/f/%d", p.ln.Addr().String(), i)
-	needs, err := p.rc.Play(ctx, url, title)
-	if err != nil {
-		return err
-	}
-	if needs {
-		// Basic mode: the receiver can't start its player from the
-		// background; the TV's own API can bring the app forward.
-		return p.dev.Launch(ctx, ReceiverPackage)
-	}
-	return nil
+	return p.mp.PlayURL(ctx, fmt.Sprintf("http://%s/f/%d", p.ln.Addr().String(), i), title)
 }
 
 // Next advances; false when the playlist is exhausted.
@@ -175,18 +160,49 @@ func (p *Playlist) Close() {
 	}
 }
 
-// Finished reports whether a now-playing document means the current item
-// is over: our player reached the end, or the user left the player.
-func Finished(n *receiver.Now) bool {
+// Observe feeds one now-playing document to the playlist and says what
+// to do: advance to the next item, or stop because the viewer left the
+// player. A short grace period after each start covers the moment before
+// the TV reports anything. Both the CLI's blocking loop and the TUI's
+// event handler drive the playlist through this one function.
+func (p *Playlist) Observe(n *device.Playing) (advance, left bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.grace > 0 {
+		p.grace--
+		if p.started(n) {
+			p.grace = 0
+		}
+		return false, false
+	}
+	if !p.finished(n) {
+		return false, false
+	}
+	if !p.ours(n) {
+		return false, true
+	}
+	return true, false
+}
+
+// ours reports whether a now-playing document is about the playlist's
+// own player.
+func (p *Playlist) ours(n *device.Playing) bool { return n != nil && n.App == p.mp.PlayerApp() }
+
+// started reports whether the current item has begun playing in our player.
+func (p *Playlist) started(n *device.Playing) bool { return p.ours(n) && n.State == "playing" }
+
+// finished reports whether a now-playing document means the current item
+// is over: our player reached the end, or the viewer left the player.
+func (p *Playlist) finished(n *device.Playing) bool {
 	if n == nil {
 		return false
 	}
-	if n.App == ReceiverPackage {
+	if p.ours(n) {
 		return n.State == "stopped"
 	}
 	// Not our player at all: either nothing is playing or something else
 	// took over. Both mean we're done with this item.
-	return n.Foreground == nil || *n.Foreground != ReceiverPackage
+	return n.Foreground == nil || *n.Foreground != p.mp.PlayerApp()
 }
 
 // localIPFor finds the local address the OS would use to reach host by

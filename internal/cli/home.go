@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,32 +10,33 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/omAthalye/tvctl/internal/receiver"
+	"github.com/omAthalye/tvctl/internal/device"
 )
 
 // The home dashboard lives in the companion app on the TV: a minimal row of
-// tiles shown instead of Amazon's home screen. Reordering happens on the TV
+// tiles shown instead of the TV's own home screen. Reordering happens on the TV
 // itself (long-press OK on a tile); everything else is here.
 
 var reInput = regexp.MustCompile(`^hdmi[1-4]$`)
 
 func (e *cmds) home() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "home",
-		Short: "The TV's home dashboard: tiles, on/off, wallpaper",
-		Long: `A minimal home screen from the companion app, shown instead of Amazon's
-when on. Amazon's Settings stays reachable (the gear, or Alexa).
+		Use:         "home",
+		Short:       "The TV's home dashboard: tiles, on/off, wallpaper",
+		Annotations: meta(needsCompanion, ""),
+		Long: `A minimal home screen from the companion app, shown instead of the TV's own
+when on. The TV's settings stay reachable (the gear, or its assistant).
 
   tv home                        show the tiles and whether it's on
-  tv home on | off               replace Amazon's home screen, or stop
+  tv home on | off               replace the TV's home screen, or stop
   tv home add <app|hdmi1..4>     add a tile (--at N for a position)
   tv home remove <app|hdmiN|N>   remove a tile
   tv home wallpaper <image|off>  set or clear the background
 
 On the TV, long-press OK on a tile to move it, then ◀ ▶ and OK.`,
 		Args: cobra.NoArgs,
-		RunE: e.runRC(func(s *session, _ []string) error {
-			st, err := s.rc.Home(s.ctx)
+		RunE: e.runHome(func(s *session, hd device.HomeDashboard, _ []string) error {
+			st, err := hd.Home(s.ctx)
 			if err != nil {
 				return err
 			}
@@ -48,8 +48,19 @@ On the TV, long-press OK on a tile to move it, then ◀ ▶ and OK.`,
 	return c
 }
 
-func describeHome(st *receiver.HomeState) string {
-	state := "off (Amazon's home screen shows)"
+// runHome is run for the dashboard verbs: one capability check for all.
+func (e *cmds) runHome(f func(s *session, hd device.HomeDashboard, args []string) error) func(*cobra.Command, []string) error {
+	return e.run(func(s *session, args []string) error {
+		hd, err := NeedAddon[device.HomeDashboard](s.dev, "the home dashboard")
+		if err != nil {
+			return err
+		}
+		return f(s, hd, args)
+	})
+}
+
+func describeHome(st *device.Dashboard) string {
+	state := "off (the TV's own home screen shows)"
 	if st.Enabled {
 		state = "on"
 	}
@@ -70,18 +81,23 @@ func describeHome(st *receiver.HomeState) string {
 }
 
 func (e *cmds) homeToggle(use string, on bool) *cobra.Command {
-	short := "Show the dashboard instead of Amazon's home screen"
+	short := "Show the dashboard instead of the TV's own home screen"
 	if !on {
-		short = "Stop replacing Amazon's home screen"
+		short = "Stop replacing the TV's home screen"
 	}
 	return &cobra.Command{
-		Use: use, Short: short, Args: cobra.NoArgs,
-		RunE: e.runRC(func(s *session, _ []string) error {
-			st, err := s.rc.SetHome(s.ctx, &on, nil)
+		Use: use, Short: short, Args: cobra.NoArgs, Annotations: meta(needsCompanion, ""),
+		RunE: e.runHome(func(s *session, hd device.HomeDashboard, _ []string) error {
+			st, err := hd.SetHome(s.ctx, &on, nil)
 			if err != nil {
 				return err
 			}
-			e.emit(describeHome(st), st)
+			line := "Dashboard off."
+			if on {
+				line = "Dashboard on."
+			}
+			e.notice(line)
+			e.emit(line, st)
 			return nil
 		}),
 	}
@@ -90,33 +106,35 @@ func (e *cmds) homeToggle(use string, on bool) *cobra.Command {
 func (e *cmds) homeAdd() *cobra.Command {
 	var at int
 	c := &cobra.Command{
-		Use:   "add <app|hdmi1..4>",
-		Short: "Add a tile (an app by alias, name or package, or an HDMI input)",
-		Args:  cobra.ExactArgs(1),
-		RunE: e.runRC(func(s *session, args []string) error {
+		Annotations: meta(needsCompanion, ""),
+		Use:         "add <app|hdmi1..4>",
+		Short:       "Add a tile (an app by alias, name or package, or an HDMI input)",
+		Args:        cobra.ExactArgs(1),
+		RunE: e.runHome(func(s *session, hd device.HomeDashboard, args []string) error {
 			t, err := s.homeTile(args[0])
 			if err != nil {
 				return err
 			}
-			st, err := s.rc.Home(s.ctx)
+			st, err := hd.Home(s.ctx)
 			if err != nil {
 				return err
 			}
 			for _, x := range st.Tiles {
 				if x.Type == t.Type && x.ID == t.ID {
-					return fmt.Errorf("%s is already on the dashboard", x.Label)
+					return device.Failf("%s is already on the dashboard", x.Label)
 				}
 			}
-			tiles := append([]receiver.HomeTile{}, st.Tiles...)
+			tiles := append([]device.Tile{}, st.Tiles...)
 			pos := len(tiles)
 			if at > 0 && at <= len(tiles) {
 				pos = at - 1
 			}
-			tiles = append(tiles[:pos], append([]receiver.HomeTile{t}, tiles[pos:]...)...)
-			if st, err = s.rc.SetHome(s.ctx, nil, tiles); err != nil {
+			tiles = append(tiles[:pos], append([]device.Tile{t}, tiles[pos:]...)...)
+			if st, err = hd.SetHome(s.ctx, nil, tiles); err != nil {
 				return err
 			}
-			e.emit(describeHome(st), st)
+			e.notice("Tile added.")
+			e.emit("Tile added.", st)
 			return nil
 		}),
 	}
@@ -126,11 +144,12 @@ func (e *cmds) homeAdd() *cobra.Command {
 
 func (e *cmds) homeRemove() *cobra.Command {
 	return &cobra.Command{
-		Use:   "remove <app|hdmiN|position>",
-		Short: "Remove a tile",
-		Args:  cobra.ExactArgs(1),
-		RunE: e.runRC(func(s *session, args []string) error {
-			st, err := s.rc.Home(s.ctx)
+		Annotations: meta(needsCompanion, ""),
+		Use:         "remove <app|hdmiN|position>",
+		Short:       "Remove a tile",
+		Args:        cobra.ExactArgs(1),
+		RunE: e.runHome(func(s *session, hd device.HomeDashboard, args []string) error {
+			st, err := hd.Home(s.ctx)
 			if err != nil {
 				return err
 			}
@@ -145,13 +164,14 @@ func (e *cmds) homeRemove() *cobra.Command {
 				}
 			}
 			if idx < 0 || idx >= len(st.Tiles) {
-				return fmt.Errorf("no tile %q on the dashboard (tv home lists them)", args[0])
+				return device.Failf("no tile %s on the dashboard", args[0]).Note("tv home lists them")
 			}
-			tiles := append(append([]receiver.HomeTile{}, st.Tiles[:idx]...), st.Tiles[idx+1:]...)
-			if st, err = s.rc.SetHome(s.ctx, nil, tiles); err != nil {
+			tiles := append(append([]device.Tile{}, st.Tiles[:idx]...), st.Tiles[idx+1:]...)
+			if st, err = hd.SetHome(s.ctx, nil, tiles); err != nil {
 				return err
 			}
-			e.emit(describeHome(st), st)
+			e.notice("Tile removed.")
+			e.emit("Tile removed.", st)
 			return nil
 		}),
 	}
@@ -159,29 +179,31 @@ func (e *cmds) homeRemove() *cobra.Command {
 
 func (e *cmds) homeWallpaper() *cobra.Command {
 	return &cobra.Command{
-		Use:   "wallpaper <image|off>",
-		Short: "Set the dashboard's background image (JPEG/PNG/WebP), or off for the default",
-		Args:  cobra.ExactArgs(1),
-		RunE: e.runRC(func(s *session, args []string) error {
-			var st *receiver.HomeState
+		Annotations: meta(needsCompanion, ""),
+		Use:         "wallpaper <image|off>",
+		Short:       "Set the dashboard's background image (JPEG/PNG/WebP), or off for the default",
+		Args:        cobra.ExactArgs(1),
+		RunE: e.runHome(func(s *session, hd device.HomeDashboard, args []string) error {
+			var st *device.Dashboard
 			var err error
-			msg := fmt.Sprintf("✓ %s is now the TV's wallpaper", filepath.Base(args[0]))
+			msg := "Wallpaper set."
 			if args[0] == "off" {
-				msg = "✓ wallpaper cleared: back to the default"
-				st, err = s.rc.ClearWallpaper(s.ctx)
+				msg = "Wallpaper cleared."
+				st, err = hd.ClearWallpaper(s.ctx)
 			} else {
 				img, rerr := os.ReadFile(args[0])
 				if rerr != nil {
-					return rerr
+					return device.Failf("couldn't read %s", filepath.Base(args[0])).Because(rerr)
 				}
 				if len(img) > 25<<20 {
-					return errors.New("image must be under 25 MB")
+					return device.Fail("the image must be under 25 MB")
 				}
-				st, err = s.rc.SetWallpaper(s.ctx, img)
+				st, err = hd.SetWallpaper(s.ctx, img)
 			}
 			if err != nil {
 				return err
 			}
+			e.notice(msg)
 			e.emit(msg, st)
 			return nil
 		}),
@@ -190,13 +212,13 @@ func (e *cmds) homeWallpaper() *cobra.Command {
 
 // homeTile turns "hdmi1" into an input tile and anything else into an app
 // tile, resolved like `tv open` (alias, name prefix or package).
-func (s *session) homeTile(name string) (receiver.HomeTile, error) {
+func (s *session) homeTile(name string) (device.Tile, error) {
 	if n := strings.ToLower(name); reInput.MatchString(n) {
-		return receiver.HomeTile{Type: "input", ID: n}, nil
+		return device.Tile{Type: "input", ID: n}, nil
 	}
 	id, err := s.resolveApp(name)
 	if err != nil {
-		return receiver.HomeTile{}, err
+		return device.Tile{}, err
 	}
-	return receiver.HomeTile{Type: "app", ID: id}, nil
+	return device.Tile{Type: "app", ID: id}, nil
 }

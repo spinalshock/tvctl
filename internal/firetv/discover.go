@@ -1,15 +1,16 @@
 package firetv
 
 import (
-	"bufio"
 	"context"
-	"net"
+	"net/textproto"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/grandcat/zeroconf"
+
+	"github.com/omAthalye/tvctl/internal/netx"
 )
 
 // Found is a discovered Fire TV before pairing.
@@ -69,7 +70,10 @@ func Discover(ctx context.Context, timeout time.Duration) ([]Found, error) {
 		}
 		mu.Unlock()
 	}()
-	go func() { defer wg.Done(); ssdp(ctx, func(ip string) { add(ip, "") }) }()
+	go func() {
+		defer wg.Done()
+		netx.SSDP(ctx, "urn:dial-multiscreen-org:service:dial:1", func(ip string, _ textproto.MIMEHeader) { add(ip, "") })
+	}()
 	wg.Wait()
 
 	// Confirm each candidate is actually a Fire TV. Short per-host budget
@@ -121,39 +125,4 @@ func unescapeMDNS(s string) string {
 		b.WriteByte(s[i])
 	}
 	return b.String()
-}
-
-// ssdp sends one multicast M-SEARCH for DIAL and collects responders until
-// ctx ends. We only need the source IP of each reply; the LOCATION header
-// would give a description URL but DIAL on Fire TV doesn't serve it anyway.
-func ssdp(ctx context.Context, hit func(ip string)) {
-	conn, err := net.ListenPacket("udp4", ":0")
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-	dst := &net.UDPAddr{IP: net.IPv4(239, 255, 255, 250), Port: 1900}
-	msg := "M-SEARCH * HTTP/1.1\r\n" +
-		"HOST: 239.255.255.250:1900\r\n" +
-		"MAN: \"ssdp:discover\"\r\n" +
-		"MX: 1\r\n" +
-		"ST: urn:dial-multiscreen-org:service:dial:1\r\n\r\n"
-	for i := 0; i < 2; i++ { // UDP; send twice for luck
-		_, _ = conn.WriteTo([]byte(msg), dst)
-	}
-	buf := make([]byte, 2048)
-	for {
-		dl, _ := ctx.Deadline()
-		_ = conn.SetReadDeadline(dl)
-		n, from, err := conn.ReadFrom(buf)
-		if err != nil {
-			return
-		}
-		sc := bufio.NewScanner(strings.NewReader(string(buf[:n])))
-		if sc.Scan() && strings.HasPrefix(sc.Text(), "HTTP/1.1 200") {
-			if ua, ok := from.(*net.UDPAddr); ok {
-				hit(ua.IP.String())
-			}
-		}
-	}
 }

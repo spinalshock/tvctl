@@ -10,18 +10,17 @@ import (
 	"strings"
 
 	"github.com/omAthalye/tvctl/internal/cli"
-	"github.com/omAthalye/tvctl/internal/tui"
 )
 
 func main() {
 	if len(os.Args) == 1 {
-		if err := tui.Run(); err != nil {
+		if err := openTUI(); err != nil {
 			fmt.Fprintln(os.Stderr, "tv:", err)
 			os.Exit(1)
 		}
 		return
 	}
-	env := &cli.Env{Out: os.Stdout, Ask: askStdin}
+	env := &cli.Env{Out: os.Stdout, Ask: askStdin, Interactive: isTerminal(os.Stdin)}
 	if err := cli.Run(os.Args[1:], env); err != nil {
 		// `tv watch cmd` ends with cmd's status so scripts can chain on it.
 		var ec interface{ ExitCode() int }
@@ -30,6 +29,14 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+// isTerminal reports whether f is a terminal, i.e. a person can answer a
+// question. A pipe or /dev/null (a script, a voice assistant) can't, and
+// commands that would ask then say what to run next instead.
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
 // askStdin reads one line from the terminal, for the pairing PIN and

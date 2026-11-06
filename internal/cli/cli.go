@@ -7,10 +7,11 @@
 // So a command exists exactly once, and whatever the CLI can do, the prompt
 // can do.
 //
-// Layout: this file holds the plumbing (Env, Root, session) and the verbs
-// that talk to the TV's own API. receiver.go has the verbs that need the
-// companion app, media.go the transport verbs, search.go search, and
-// overlay.go / dash.go the on-screen ones.
+// Layout: this file holds the plumbing (Env, Root, session) and the core
+// verbs. companion.go has the verbs whose capability usually comes from
+// the companion add-on, media.go the transport verbs, search.go search,
+// voice.go pairing, inputs and the tool manifest, and home.go / overlay.go
+// / dash.go the on-screen ones.
 package cli
 
 import (
@@ -30,9 +31,14 @@ import (
 
 	"github.com/omAthalye/tvctl/internal/config"
 	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/firetv"
-	"github.com/omAthalye/tvctl/internal/receiver"
+	"github.com/omAthalye/tvctl/internal/netx"
+	"github.com/omAthalye/tvctl/internal/youtube"
 )
+
+// Nothing in this package names a brand. Drivers register themselves
+// (drivers.go) and expose what they can do through device's optional
+// interfaces; a verb asserts the capability it needs and otherwise says
+// "<TV> can't do <that>".
 
 // Env is what a command needs from its host: where to print, how to ask the
 // user a question, and the parsed global flags. The CLI and the TUI build
@@ -42,15 +48,25 @@ type Env struct {
 	Ask    func(prompt string) (string, error)
 	JSON   bool
 	Device string
+	// Interactive is true when a person is at the keyboard to answer Ask.
+	// When false (a pipe, the TUI, a voice assistant) commands that would
+	// prompt instead return what to run next: pairing shows the PIN and
+	// stops, and `tv pin` finishes it.
+	Interactive bool
+	// Notice, when set, also gets each outcome worth announcing ("launched
+	// …", "playing …"), for a host that shows it prominently (the TUI's
+	// toast). Routine acks ("ok") don't come here.
+	Notice func(text string)
 }
 
 // Help groups. Order here is the order in `tv --help`.
 const (
-	groupSetup  = "setup"
-	groupRemote = "remote"
-	groupApps   = "apps"
-	groupMedia  = "media"
-	groupScreen = "screen"
+	groupSetup   = "setup"
+	groupMachine = "machine"
+	groupRemote  = "remote"
+	groupApps    = "apps"
+	groupMedia   = "media"
+	groupScreen  = "screen"
 )
 
 // Root builds a fresh command tree bound to env. Fresh per call on purpose:
@@ -75,19 +91,24 @@ func Root(env *Env) *cobra.Command {
 		&cobra.Group{ID: groupApps, Title: "Apps and search:"},
 		&cobra.Group{ID: groupMedia, Title: "Media:"},
 		&cobra.Group{ID: groupScreen, Title: "Screen:"},
+		&cobra.Group{ID: groupMachine, Title: "This machine:"},
 	)
 	e := &cmds{env: env}
 	add := func(group string, cs ...*cobra.Command) {
 		for _, c := range cs {
+			if c == nil {
+				continue // left out of this build
+			}
 			c.GroupID = group
 			root.AddCommand(c)
 		}
 	}
-	add(groupSetup, e.discover(), e.pair(), e.setup(), e.devices(), e.status(), e.initCmd(), e.shell(), e.install())
-	add(groupRemote, e.key(), e.vol(), e.sleep(), e.wake(), e.text(), e.say())
+	add(groupSetup, e.pair(), e.pin(), e.devices(), e.status(), e.companion())
+	add(groupRemote, e.key(), e.vol(), e.input(), e.sleep(), e.wake(), e.text(), e.say())
 	add(groupApps, e.openCmd(), e.apps(), e.search(), e.yt())
-	add(groupMedia, e.play(), e.now(), e.pause(), e.resume(), e.toggle(), e.stop(), e.next(), e.prev(), e.seek(), e.events())
+	add(groupMedia, e.play(), e.pause(), e.stop(), e.seek(), e.now(), e.events())
 	add(groupScreen, e.home(), e.shot(), e.toast(), e.overlay(), e.watch(), e.dash())
+	add(groupMachine, e.initCmd(), e.tools(), e.shell(), e.install())
 	return root
 }
 
@@ -113,6 +134,18 @@ func Verbs() []string {
 		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+// Choices is each verb's fixed first-argument values (key names, vol
+// up|down|mute, input hdmi1…), for completion. Derived from the tree.
+func Choices() map[string][]string {
+	out := map[string][]string{}
+	for _, c := range Root(&Env{Out: io.Discard}).Commands() {
+		if len(c.ValidArgs) > 0 {
+			out[c.Name()] = c.ValidArgs
+		}
+	}
 	return out
 }
 
@@ -146,24 +179,41 @@ func invokedAs() string {
 
 // ---- plumbing -------------------------------------------------------------
 
-// ctx is cancelled on Ctrl-C so a stuck TV never leaves a hung process.
-func ctx() (context.Context, context.CancelFunc) {
-	return signal.NotifyContext(context.Background(), os.Interrupt)
+// ctx is the context every command runs under: cancelled on Ctrl-C so a
+// stuck TV never leaves a hung process, and bounded by the command's
+// deadline annotation so a TV that went away costs seconds, not a hung
+// assistant. Streaming verbs opt out with deadline "none".
+func ctx(cmd *cobra.Command) (context.Context, context.CancelFunc) {
+	cx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	tcx, tcancel := withDeadline(cx, cmd)
+	return tcx, func() { tcancel(); cancel() }
+}
+
+// withDeadline cuts a verb's deadline from base; "none" returns base as is.
+func withDeadline(base context.Context, cmd *cobra.Command) (context.Context, context.CancelFunc) {
+	dl := deadlineFor(cmd)
+	if dl == 0 {
+		return base, func() {}
+	}
+	return context.WithTimeout(base, dl)
 }
 
 // session is everything a verb needs, opened once per command: a context
-// cancelled on Ctrl-C, the device driver, the config entry it came from,
-// and the companion-app client when one is paired.
+// cancelled on Ctrl-C, the device driver and the config entry it came
+// from. Whatever the TV can do, including through an add-on, is asked of
+// the driver through device's optional interfaces.
 type session struct {
-	ctx   context.Context
-	id    string // config key; the TV's serial
+	ctx   context.Context // bounded by the verb's deadline
+	base  context.Context // Ctrl-C only; what the deadline is cut from
+	id    string          // config key; the TV's stable id
 	dev   device.Device
 	store *config.Store
 	entry config.Entry
-	rc    *receiver.Client // nil until `tv setup` has run on this TV
+
+	appList []device.App // the TV's apps, once fetched (see apps)
 }
 
-func (e *cmds) openSession() (*session, context.CancelFunc, error) {
+func (e *cmds) openSession(cmd *cobra.Command) (*session, context.CancelFunc, error) {
 	st, err := config.Load()
 	if err != nil {
 		return nil, nil, err
@@ -172,56 +222,81 @@ func (e *cmds) openSession() (*session, context.CancelFunc, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	var d device.Device
-	switch ent.Brand {
-	case "firetv", "":
-		c := firetv.New(ent.Host, ent.Name, ent.Token)
-		c.MAC = ent.MAC
-		c.Serial = id
-		d = c
-	default:
-		return nil, nil, fmt.Errorf("unsupported brand %q", ent.Brand)
+	d, err := device.Open(DeviceConfig(id, ent))
+	if err != nil {
+		return nil, nil, err
 	}
-	cx, cancel := ctx()
-	s := &session{ctx: cx, id: id, dev: d, store: st, entry: ent}
-	if ent.ReceiverToken != "" {
-		s.rc = receiver.New(ent.Host, ent.ReceiverToken)
-	}
-	return s, cancel, nil
+	base, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	cx, tcancel := withDeadline(base, cmd)
+	s := &session{ctx: cx, base: base, id: id, dev: d, store: st, entry: ent}
+	return s, func() { tcancel(); stop() }, nil
 }
 
 // run wraps a verb body: open the session, run it, clean up. Every verb
 // that talks to the TV goes through here, so that boilerplate exists once.
 func (e *cmds) run(f func(s *session, args []string) error) func(*cobra.Command, []string) error {
-	return func(_ *cobra.Command, args []string) error {
-		s, cancel, err := e.openSession()
+	return func(cmd *cobra.Command, args []string) error {
+		s, cancel, err := e.openSession(cmd)
 		if err != nil {
 			return err
 		}
 		defer cancel()
-		return f(s, args)
+		if wakes(cmd) {
+			if err := s.wakeIfAsleep(cmd); err != nil {
+				return err
+			}
+		}
+		err = f(s, args)
+		if errors.Is(err, context.DeadlineExceeded) || (err != nil && s.ctx.Err() == context.DeadlineExceeded) {
+			return device.Failf("%s didn't answer in time", tvName(s.dev))
+		}
+		if err == nil && s.entry.MAC == "" {
+			// A TV paired before its address was kept gets it now, while
+			// the connection is warm. Best effort, never an error of its own.
+			if mac := learnMAC(s.base, s.dev, s.entry.Host); mac != "" {
+				s.entry.MAC = mac
+				_ = s.save()
+			}
+		}
+		return err
 	}
 }
 
-// runRC is run for verbs that need the companion app, with one consistent
-// message when it isn't there instead of a 403 from the TV.
-func (e *cmds) runRC(f func(s *session, args []string) error) func(*cobra.Command, []string) error {
-	return e.run(func(s *session, args []string) error {
-		if s.rc == nil {
-			return errors.New("companion app not set up on this TV: run `tv setup`")
+// learnMAC is the TV's hardware address, for Wake-on-LAN: what the driver
+// already knows, else what it can ask the TV (device.MACLearner), else the
+// local ARP cache, which knows the TV because we just talked to it. ""
+// when none of them does.
+func learnMAC(ctx context.Context, dev device.Device, host string) string {
+	if mac := dev.Info().MAC; mac != "" {
+		return mac
+	}
+	cx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if l, ok := dev.(device.MACLearner); ok {
+		if mac := l.LearnMAC(cx); mac != "" {
+			return mac
 		}
-		return f(s, args)
-	})
+	}
+	return netx.MACOf(host)
 }
 
-// bringForward is the basic-mode fallback: when the receiver parks a
-// request because it can't start activities from the background, launch
-// the receiver app through the TV's own API, which may.
-func (s *session) bringForward(needs bool) error {
-	if !needs {
+// wakeIfAsleep is the first rung of doing what was asked on a TV that is
+// off: one probe, and if it is asleep, wake it with its own budget, then
+// give the verb its full deadline again. A TV that can't be woken, or
+// can't tell, is left to the verb's own error.
+func (s *session) wakeIfAsleep(cmd *cobra.Command) error {
+	sl, ok := s.dev.(device.Sleeper)
+	w, canWake := s.dev.(device.Waker)
+	if !ok || !canWake || !sl.Asleep(s.base) {
 		return nil
 	}
-	return s.dev.Launch(s.ctx, "dev.tvctl.receiver")
+	wcx, wcancel := context.WithTimeout(s.base, 30*time.Second)
+	defer wcancel()
+	if err := w.Wake(wcx); err != nil {
+		return err
+	}
+	s.ctx, _ = withDeadline(s.base, cmd) // released with base when the command ends
+	return nil
 }
 
 // save persists a changed entry (a receiver token after setup).
@@ -249,10 +324,15 @@ func (e *cmds) emitErr(err error) {
 		_ = json.NewEncoder(e.env.Out).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	fmt.Fprintln(e.env.Out, "tv:", err)
+	// The plain line is what gets read aloud when an assistant runs tv, so
+	// it is one short sentence; the full cause chain is in --json.
+	fmt.Fprintln(e.env.Out, spoken(err))
 }
 
-// ok is the common "it worked" emit: the human word plus the fields.
+// ok is the common "it worked" emit: the plain line plus the fields. The
+// plain output of tv is what an assistant reads aloud, so a routine ack (a
+// key, the volume) passes "" and prints nothing: the TV's own screen is
+// the feedback. --json always gets the document.
 func (e *cmds) ok(human string, fields map[string]any) error {
 	if fields == nil {
 		fields = map[string]any{}
@@ -262,6 +342,18 @@ func (e *cmds) ok(human string, fields map[string]any) error {
 	return nil
 }
 
+// done is ok for an outcome worth announcing: one short sentence.
+func (e *cmds) done(human string, fields map[string]any) error {
+	e.notice(human)
+	return e.ok(human, fields)
+}
+
+func (e *cmds) notice(text string) {
+	if e.env.Notice != nil && !e.env.JSON {
+		e.env.Notice(text)
+	}
+}
+
 // need asserts an optional capability and turns a missing one into a
 // readable error instead of a panic.
 func need[T any](d device.Device, what string) (T, error) {
@@ -269,25 +361,48 @@ func need[T any](d device.Device, what string) (T, error) {
 		return t, nil
 	}
 	var zero T
-	return zero, fmt.Errorf("%s does not support %s", d.Info().Brand, what)
+	return zero, device.Failf("%s can't do %s", tvName(d), what)
+}
+
+// NeedAddon is need for a capability the companion add-on provides. A TV
+// that could take the add-on but doesn't have it yet is told what to run;
+// one that can't is told it can't. Exported for the TUI's own shortcuts.
+func NeedAddon[T any](d device.Device, what string) (T, error) {
+	t, err := need[T](d, what)
+	if err != nil {
+		if _, can := d.(device.Installer); can {
+			return t, device.Failf("%s needs the companion app for %s", tvName(d), what).Note("run tv companion")
+		}
+	}
+	return t, err
+}
+
+// tvName is what errors call the TV.
+func tvName(d device.Device) string {
+	if n := d.Info().Name; n != "" {
+		return n
+	}
+	return d.Info().Brand
 }
 
 // ---- apps -----------------------------------------------------------------
 
-// Aliases are the words people type; the values are package names. Anything
-// not here is matched against the TV's live app list by name prefix.
-// Exported so the TUI can offer them in completion.
+// Aliases are the short words people say for apps, and each app's proper
+// name. The name is resolved on whatever TV is in front (resolveApp): the
+// driver answers for apps it knows by name, else the TV's own list is
+// matched by prefix. No app ids here: which package or id an app has is a
+// brand's business. Exported so the TUI can offer them in completion.
 var Aliases = map[string]string{
-	"netflix":    "com.netflix.ninja",
-	"youtube":    YouTubeApp,
-	"yt":         YouTubeApp,
-	"spotify":    "com.spotify.tv.android",
-	"silk":       "com.amazon.cloud9",
-	"browser":    "com.amazon.cloud9",
-	"prime":      "com.amazon.firebat", // Prime Video's package on Fire TV
-	"primevideo": "com.amazon.firebat",
-	"gfn":        "com.nvidia.tegrazone3",
-	"projectivy": "com.spocky.projengmenu",
+	"netflix":    "Netflix",
+	"youtube":    "YouTube",
+	"yt":         "YouTube",
+	"spotify":    "Spotify",
+	"prime":      "Prime Video",
+	"primevideo": "Prime Video",
+	"browser":    "Browser",
+	"silk":       "Silk",
+	"gfn":        "GeForce NOW",
+	"projectivy": "Projectivy",
 }
 
 // AliasNames is Aliases' keys, sorted, for help text and completion.
@@ -300,44 +415,59 @@ func AliasNames() []string {
 	return names
 }
 
-// AllApps merges the TV's own app list with the receiver's, when one is
-// paired. The TV's API omits built-in apps (Prime Video, Appstore,
-// Gallery); the receiver asks the launcher and sees them all. rc may be
-// nil. A receiver failure is not an error: the TV list still stands.
-func AllApps(cx context.Context, d device.Device, rc *receiver.Client) ([]device.App, error) {
-	apps, err := d.Apps(cx)
-	if err != nil {
-		return nil, err
+// resolveApp turns what the user said into this TV's app id: an id as is
+// (it has a dot), else an alias's proper name or the words themselves,
+// asked of the driver first (device.AppNamer) and then matched against the
+// TV's app list by unique prefix.
+func (s *session) resolveApp(word string) (string, error) {
+	if strings.Contains(word, ".") {
+		return word, nil
 	}
-	if rc == nil {
-		return apps, nil
+	name := word
+	if n, ok := Aliases[strings.ToLower(word)]; ok {
+		name = n
 	}
-	more, err := rc.Apps(cx)
-	if err != nil {
-		return apps, nil
-	}
-	seen := make(map[string]bool, len(apps))
-	for _, a := range apps {
-		seen[a.ID] = true
-	}
-	for _, a := range more {
-		if !seen[a.ID] {
-			apps = append(apps, device.App{ID: a.ID, Name: a.Name, Installed: true})
+	if an, ok := s.dev.(device.AppNamer); ok {
+		if id, ok := an.AppID(name); ok {
+			return id, nil
 		}
 	}
-	return apps, nil
+	return s.appByName(name)
 }
 
-// resolveApp turns user input into a package id: explicit package, alias,
-// or unique case-insensitive prefix of an app's name (see AllApps).
-func (s *session) resolveApp(name string) (string, error) {
-	if strings.Contains(name, ".") {
-		return name, nil
+// apps is the TV's app list, fetched once per command.
+func (s *session) apps() ([]device.App, error) {
+	if s.appList == nil {
+		apps, err := s.dev.Apps(s.ctx)
+		if err != nil {
+			return nil, err
+		}
+		s.appList = apps
 	}
-	if id, ok := Aliases[strings.ToLower(name)]; ok {
-		return id, nil
+	return s.appList, nil
+}
+
+// appTitle is the name to say for an app id: the driver's name for it,
+// else the title the TV lists it under, else the id itself.
+func (s *session) appTitle(id string) string {
+	if an, ok := s.dev.(device.AppNamer); ok {
+		if n := an.AppName(id); n != "" {
+			return n
+		}
 	}
-	apps, err := AllApps(s.ctx, s.dev, s.rc)
+	if apps, err := s.apps(); err == nil {
+		for _, a := range apps {
+			if a.ID == id && a.Name != "" {
+				return a.Name
+			}
+		}
+	}
+	return id
+}
+
+// appByName finds the one app on this TV whose name starts with name.
+func (s *session) appByName(name string) (string, error) {
+	apps, err := s.apps()
 	if err != nil {
 		return "", err
 	}
@@ -351,175 +481,171 @@ func (s *session) resolveApp(name string) (string, error) {
 	case 1:
 		return hits[0].ID, nil
 	case 0:
-		return "", fmt.Errorf("no app matches %q (try `tv apps`)", name)
+		return "", device.Failf("no app called %s on this TV", name)
 	}
 	names := make([]string, len(hits))
 	for i, h := range hits {
 		names[i] = h.Name
 	}
-	return "", fmt.Errorf("ambiguous %q: %s", name, strings.Join(names, ", "))
+	return "", device.Failf("%s could mean %s", name, strings.Join(names, " or "))
 }
 
-// openLink routes a link. YouTube goes through the lounge protocol, which
-// needs no app on the TV. Everything else is best handled by Android's own
-// URL routing via the companion app (Netflix titles deep-link, web pages
-// open in Silk); without the app, fall back to the stock route.
+// openApp resolves and launches an app, and returns the name to announce.
+func (s *session) openApp(word string) (id, name string, err error) {
+	if id, err = s.resolveApp(word); err != nil {
+		return "", "", err
+	}
+	if err = s.dev.Launch(s.ctx, id); err != nil {
+		return "", "", err
+	}
+	return id, s.appTitle(id), nil
+}
+
+// openLink hands a link to the TV. Where it lands (YouTube's app, a
+// browser, a deep link) is the driver's business.
 func (s *session) openLink(link string) error {
 	if !strings.Contains(link, "://") {
 		link = "https://" + link // "youtube.com/watch?v=..." pasted without a scheme
 	}
-	if s.rc != nil {
-		// YouTube links go to the YouTube app tvctl uses (SmartTube); the
-		// rest to whatever on the TV handles them.
-		pkg := ""
-		if isYouTube(link) {
-			pkg = YouTubeApp
-		}
-		needs, err := s.rc.Open(s.ctx, link, pkg)
-		if err == nil {
-			return s.bringForward(needs)
-		}
-		if pkg == "" {
-			return err
-		}
-		// SmartTube missing or refusing the link: fall back to the TV's own route.
-	}
-	o, err := need[device.URLOpener](s.dev, "opening URLs")
+	o, err := need[device.URLOpener](s.dev, "opening links")
 	if err != nil {
 		return err
 	}
 	return o.OpenURL(s.ctx, link)
 }
 
-// YouTubeApp is the app tvctl uses for YouTube: SmartTube, an ad-free
-// client, which handles youtube.com and youtu.be links itself.
-const YouTubeApp = "org.smarttube.stable"
-
-func isYouTube(link string) bool {
-	l := strings.ToLower(link)
-	return strings.Contains(l, "youtube.com/") || strings.Contains(l, "youtu.be/")
-}
-
 // isLink is the one definition of "this argument is a URL".
 func isLink(s string) bool {
-	return strings.Contains(s, "://") || strings.HasPrefix(strings.ToLower(s), "www.") || isYouTube(s)
+	return strings.Contains(s, "://") || strings.HasPrefix(strings.ToLower(s), "www.") || youtube.IsLink(s)
 }
 
 // ---- setup verbs ----------------------------------------------------------
 
-func (e *cmds) discover() *cobra.Command {
-	return &cobra.Command{
-		Use:   "discover",
-		Short: "Find TVs on the local network",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cx, cancel := ctx()
-			defer cancel()
-			found, err := firetv.Discover(cx, 2500*time.Millisecond)
-			if err != nil {
-				return err
-			}
-			if len(found) == 0 {
-				return errors.New("no Fire TVs found (is the TV on and on this network?)")
-			}
-			var lines []string
-			for _, f := range found {
-				lines = append(lines, fmt.Sprintf("%-16s %s", f.Host, f.Name))
-			}
-			e.emit(strings.Join(lines, "\n"), found)
-			return nil
-		},
-	}
+// DeviceConfig is a saved entry as its driver sees it. An entry from
+// before there was more than one brand has no brand; the registry knows
+// whose those are.
+func DeviceConfig(id string, ent config.Entry) device.Config {
+	return device.Config{ID: id, Brand: ent.Brand, Name: ent.Name, Host: ent.Host, MAC: ent.MAC, Token: ent.Token, CompanionToken: ent.CompanionToken}
 }
 
 func (e *cmds) pair() *cobra.Command {
-	var token string
+	var token, brand string
 	c := &cobra.Command{
-		Use:   "pair [host]",
-		Short: "Pair with a TV (shows a PIN on screen)",
-		Long: `Pair with a TV. Without a host, discovers Fire TVs and uses the only one
-found (or asks you to pick). The TV shows a PIN; type it here. Pairing is
-stored in ` + mustPath() + ` and survives TV reboots.`,
+		Use:         "pair [host]",
+		Short:       "Pair with a TV (a PIN or an Allow prompt on screen)",
+		Annotations: meta("", "90s"),
+		Long: `Pair with a TV. Without a host, discovers TVs and uses the only one found
+(or asks you to pick; a name or IP from ` + "`tv devices --scan`" + ` also works). The TV
+then shows a PIN to read back or an Allow prompt to accept with the remote.
+At a terminal the PIN is typed here. From a script or an assistant, pair
+stops once the PIN is on screen and ` + "`tv pin <digits>`" + ` finishes the
+job. Pairing is stored in ` + mustPath() + ` and survives TV reboots.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cx, cancel := ctx()
+			cx, cancel := ctx(cmd)
 			defer cancel()
-			host, name := "", ""
-			if len(args) == 1 {
-				host = args[0]
-			} else {
-				found, err := firetv.Discover(cx, 2500*time.Millisecond)
-				if err != nil {
-					return err
-				}
-				switch len(found) {
-				case 0:
-					return errors.New("no Fire TVs found; pass the IP: tv pair 192.168.1.20")
-				case 1:
-					host, name = found[0].Host, found[0].Name
-				default:
-					for i, f := range found {
-						fmt.Fprintf(e.env.Out, "%d) %-16s %s\n", i+1, f.Host, f.Name)
+			tv, err := e.pickTV(cx, args, brand)
+			if err != nil {
+				return err
+			}
+			dev, err := device.Open(device.Config{Brand: tv.Brand, Name: tv.Name, Host: tv.Host, Token: token})
+			if err != nil {
+				return err
+			}
+			if token == "" {
+				if p, ok := dev.(device.PINPairer); ok && !e.env.Interactive {
+					if err := p.ShowPIN(cx); err != nil {
+						return err
 					}
-					s, err := e.env.Ask("which one? ")
+					st, err := config.Load()
 					if err != nil {
 						return err
 					}
-					n, _ := strconv.Atoi(s)
-					if n < 1 || n > len(found) {
-						return errors.New("no such choice")
+					st.Pending = &config.Pending{Brand: tv.Brand, Name: tv.Name, Host: tv.Host, Started: time.Now()}
+					if err := st.Save(); err != nil {
+						return err
 					}
-					host, name = found[n-1].Host, found[n-1].Name
+					return e.done("Tell me the PIN on the TV.",
+						map[string]any{"pending": true, "next": invokedAs() + " pin <digits>", "brand": tv.Brand, "name": tv.Name, "host": tv.Host})
 				}
-			}
-			cl := firetv.New(host, name, token)
-			if token == "" {
-				if _, err := cl.Pair(cx, e.env.Ask); err != nil {
-					return err
-				}
-			}
-			// Properties gives the serial, which is the stable id; the IP
-			// may change with DHCP but the serial never does.
-			props, err := cl.Status(cx)
-			if err != nil {
-				return fmt.Errorf("paired but status failed: %w", err)
-			}
-			// With an explicit host we still want the TV's own name; a quick
-			// discovery usually has it. Fall back to a generic label.
-			if name == "" {
-				if found, _ := firetv.Discover(cx, 1500*time.Millisecond); found != nil {
-					for _, f := range found {
-						if f.Host == host {
-							name = f.Name
-						}
+				if p, ok := dev.(device.Pairer); ok {
+					line := "Allow it on the TV."
+					if _, pin := dev.(device.PINPairer); pin {
+						line = "Read the PIN on the TV."
+					}
+					e.progress(line)
+					if token, err = p.Pair(cx, e.env.Ask); err != nil {
+						return err
 					}
 				}
 			}
-			if name == "" {
-				name = "Fire TV"
-			}
-			st, err := config.Load()
-			if err != nil {
-				return err
-			}
-			id := cl.Info().ID
-			st.Put(id, config.Entry{Name: name, Brand: "firetv", Host: host, Token: cl.Token})
-			if err := st.Save(); err != nil {
-				return err
-			}
-			e.emit(fmt.Sprintf("paired with %s (%s)", name, host),
-				map[string]any{"id": id, "name": name, "host": host, "properties": props})
-			return nil
+			return e.finishPair(cx, dev, tv, token)
 		},
 	}
 	c.Flags().StringVar(&token, "token", "", "import an existing client token instead of pairing")
+	c.Flags().StringVar(&brand, "brand", "", "the TV's brand ("+strings.Join(device.Brands(), ", ")+") when it can't be discovered")
 	return c
 }
 
+// pickTV finds the TV to pair: the host given (its brand from discovery, or
+// --brand), else the only TV found, else the user's choice.
+func (e *cmds) pickTV(cx context.Context, args []string, brand string) (device.Found, error) {
+	host := ""
+	if len(args) == 1 {
+		host = args[0]
+		if brand != "" {
+			return device.Found{Host: host, Brand: brand, Name: host}, nil
+		}
+	}
+	found, err := device.Discover(cx, 2500*time.Millisecond)
+	if err != nil {
+		return device.Found{}, err
+	}
+	if host != "" {
+		for _, f := range found {
+			if f.Host == host || strings.EqualFold(f.Name, host) {
+				return f, nil
+			}
+		}
+		return device.Found{}, device.Failf("no TV answered at %s", host).Notef("if it's on, pass its brand: tv pair %s --brand %s", host, strings.Join(device.Brands(), "|"))
+	}
+	switch len(found) {
+	case 0:
+		return device.Found{}, device.Fail("no TVs found").Notef("pass the IP: tv pair 192.168.1.20 --brand %s", strings.Join(device.Brands(), "|"))
+	case 1:
+		return found[0], nil
+	}
+	if !e.env.Interactive {
+		names := make([]string, len(found))
+		for i, f := range found {
+			names[i] = fmt.Sprintf("%s (%s)", f.Name, f.Host)
+		}
+		return device.Found{}, device.Failf("found %d TVs, say which: %s", len(found), strings.Join(names, ", "))
+	}
+	for i, f := range found {
+		fmt.Fprintf(e.env.Out, "%d) %-16s %-8s %s\n", i+1, f.Host, f.Brand, f.Name)
+	}
+	s, err := e.env.Ask("which one? ")
+	if err != nil {
+		return device.Found{}, err
+	}
+	n, _ := strconv.Atoi(s)
+	if n < 1 || n > len(found) {
+		return device.Found{}, device.Fail("no such choice")
+	}
+	return found[n-1], nil
+}
+
 func (e *cmds) devices() *cobra.Command {
-	return &cobra.Command{
-		Use:   "devices",
-		Short: "List paired devices",
+	var scan bool
+	c := &cobra.Command{
+		Use:         "devices",
+		Short:       "List paired TVs (--scan: find TVs on this network instead)",
+		Annotations: meta("", "6s"),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if scan {
+				return e.scan(cmd)
+			}
 			st, err := config.Load()
 			if err != nil {
 				return err
@@ -546,6 +672,31 @@ func (e *cmds) devices() *cobra.Command {
 			return nil
 		},
 	}
+	c.Flags().BoolVar(&scan, "scan", false, "find TVs on this network (paired or not)")
+	return c
+}
+
+// scan is devices --scan: what answers on this network right now.
+func (e *cmds) scan(cmd *cobra.Command) error {
+	cx, cancel := ctx(cmd)
+	defer cancel()
+	found, err := device.Discover(cx, 2500*time.Millisecond)
+	if err != nil {
+		return err
+	}
+	if len(found) == 0 {
+		return device.Fail("no TVs found on this network")
+	}
+	var lines []string
+	for _, f := range found {
+		line := fmt.Sprintf("%-16s %-8s %s", f.Host, f.Brand, f.Name)
+		if f.Model != "" && !strings.Contains(f.Name, f.Model) {
+			line += "  (" + f.Model + ")"
+		}
+		lines = append(lines, line)
+	}
+	e.emit(strings.Join(lines, "\n"), found)
+	return nil
 }
 
 func (e *cmds) status() *cobra.Command {
@@ -562,18 +713,37 @@ func (e *cmds) status() *cobra.Command {
 				return err
 			}
 			info := s.dev.Info()
-			keys := make([]string, 0, len(m))
-			for k := range m {
+			flat := map[string]any{}
+			flatten("", m, flat)
+			keys := make([]string, 0, len(flat))
+			for k := range flat {
 				keys = append(keys, k)
 			}
 			sort.Strings(keys)
 			lines := []string{fmt.Sprintf("%s  %s  %s", info.Name, info.Host, info.Brand)}
 			for _, k := range keys {
-				lines = append(lines, fmt.Sprintf("  %-28s %v", k, m[k]))
+				lines = append(lines, fmt.Sprintf("  %-32s %v", k, flat[k]))
 			}
 			e.emit(strings.Join(lines, "\n"), map[string]any{"device": info, "properties": m})
 			return nil
 		}),
+	}
+}
+
+// flatten turns nested status maps into dotted keys ("connection.wifi.mac")
+// so the plain listing is one fact per line instead of Go map syntax.
+func flatten(prefix string, v any, out map[string]any) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		out[prefix] = v
+		return
+	}
+	for k, val := range m {
+		key := k
+		if prefix != "" {
+			key = prefix + "." + k
+		}
+		flatten(key, val, out)
 	}
 }
 
@@ -590,34 +760,36 @@ func (e *cmds) key() *cobra.Command {
 		keys[i] = string(k)
 	}
 	return &cobra.Command{
-		Use:       "key <key>...",
-		Short:     "Press remote keys (home, back, select, up, down, …)",
-		Long:      "Keys: " + strings.Join(keys, " ") + ". Several can be given at once: key down down select.",
-		Args:      cobra.MinimumNArgs(1),
-		ValidArgs: keys,
+		Use:         "key <key>...",
+		Short:       "Press remote keys (home, back, select, up, down, …)",
+		Long:        "Keys: " + strings.Join(keys, " ") + ". Several can be given at once: key down down select.",
+		Args:        cobra.MinimumNArgs(1),
+		ValidArgs:   keys,
+		Annotations: meta("", "5s", wake),
 		RunE: e.run(func(s *session, args []string) error {
 			for _, a := range args {
 				if err := s.dev.Key(s.ctx, device.Key(a)); err != nil {
 					return err
 				}
 			}
-			return e.ok("ok", map[string]any{"keys": args})
+			return e.ok("", map[string]any{"keys": args})
 		}),
 	}
 }
 
 func (e *cmds) vol() *cobra.Command {
 	return &cobra.Command{
-		Use:       "vol up|down|mute [n]",
-		Short:     "Volume up/down n steps, or mute",
-		Args:      cobra.RangeArgs(1, 2),
-		ValidArgs: []string{"up", "down", "mute"},
+		Use:         "vol up|down|mute [n]",
+		Short:       "Volume up/down n steps, or mute",
+		Args:        cobra.RangeArgs(1, 2),
+		ValidArgs:   []string{"up", "down", "mute"},
+		Annotations: meta("", "8s", wake),
 		RunE: e.run(func(s *session, args []string) error {
 			n := 1
 			if len(args) == 2 {
 				var err error
 				if n, err = strconv.Atoi(args[1]); err != nil || n < 1 || n > 50 {
-					return errors.New("n must be 1..50")
+					return device.Fail("volume steps go from 1 to 50")
 				}
 			}
 			var k device.Key
@@ -629,14 +801,14 @@ func (e *cmds) vol() *cobra.Command {
 			case "mute":
 				k, n = device.KeyMute, 1
 			default:
-				return errors.New("vol up|down|mute [n]")
+				return device.Fail("say vol up, vol down or vol mute")
 			}
 			for i := 0; i < n; i++ {
 				if err := s.dev.Key(s.ctx, k); err != nil {
 					return err
 				}
 			}
-			return e.ok("ok", map[string]any{"action": args[0], "steps": n})
+			return e.ok("", map[string]any{"action": args[0], "steps": n})
 		}),
 	}
 }
@@ -644,11 +816,12 @@ func (e *cmds) vol() *cobra.Command {
 func (e *cmds) sleep() *cobra.Command {
 	return &cobra.Command{
 		Use: "sleep", Short: "Put the TV to sleep (same as key sleep)", Args: cobra.NoArgs,
+		Annotations: meta("", "8s"),
 		RunE: e.run(func(s *session, _ []string) error {
 			if err := s.dev.Key(s.ctx, device.KeySleep); err != nil {
 				return err
 			}
-			return e.ok("sleeping", nil)
+			return e.done("TV off.", nil)
 		}),
 	}
 }
@@ -656,6 +829,7 @@ func (e *cmds) sleep() *cobra.Command {
 func (e *cmds) wake() *cobra.Command {
 	return &cobra.Command{
 		Use: "wake", Short: "Wake the TV (Wake-on-LAN if a MAC is configured, then protocol wake)", Args: cobra.NoArgs,
+		Annotations: meta("", "30s"),
 		RunE: e.run(func(s *session, _ []string) error {
 			w, err := need[device.Waker](s.dev, "wake")
 			if err != nil {
@@ -664,37 +838,39 @@ func (e *cmds) wake() *cobra.Command {
 			if err := w.Wake(s.ctx); err != nil {
 				return err
 			}
-			return e.ok("awake", nil)
+			return e.done("TV on.", nil)
 		}),
 	}
 }
 
 func (e *cmds) text() *cobra.Command {
 	return &cobra.Command{
-		Use:   "text <string>...",
-		Short: "Type text into the focused field on the TV",
-		Args:  cobra.MinimumNArgs(1),
+		Use:         "text <string>...",
+		Short:       "Type text into the focused field on the TV",
+		Args:        cobra.MinimumNArgs(1),
+		Annotations: meta("", "", wake),
 		RunE: e.run(func(s *session, args []string) error {
 			str := strings.Join(args, " ")
 			if kw, ok := s.dev.(device.KeyboardWatcher); ok {
 				if open, _, err := kw.KeyboardOpen(s.ctx); err == nil && !open {
-					return errors.New("the TV's system keyboard isn't open, so there's nothing to type into. " +
-						"Netflix and YouTube draw their own keyboards: use `search netflix <words>`, `search youtube <words>`, or `say ...`")
+					return device.Fail("the TV's keyboard isn't open, so there's nothing to type into").
+						Note("Netflix and YouTube draw their own keyboards: use search netflix <words>, search youtube <words>, or say ...")
 				}
 			}
 			if err := s.dev.Text(s.ctx, str); err != nil {
 				return err
 			}
-			return e.ok("ok", map[string]any{"text": str})
+			return e.ok("", map[string]any{"text": str})
 		}),
 	}
 }
 
 func (e *cmds) say() *cobra.Command {
 	return &cobra.Command{
-		Use:   "say <phrase>...",
-		Short: "Speak to the TV's voice assistant (e.g. say switch to HDMI 1)",
-		Args:  cobra.MinimumNArgs(1),
+		Use:         "say <phrase>...",
+		Short:       "Speak to the TV's voice assistant (e.g. say switch to HDMI 1)",
+		Args:        cobra.MinimumNArgs(1),
+		Annotations: meta("", "25s", wake),
 		RunE: e.run(func(s *session, args []string) error {
 			sp, err := need[device.Speaker](s.dev, "voice commands")
 			if err != nil {
@@ -706,7 +882,7 @@ func (e *cmds) say() *cobra.Command {
 				return err
 			}
 			secs := time.Since(t0).Seconds()
-			return e.ok(fmt.Sprintf("said %q (%.1fs)", phrase, secs), map[string]any{"phrase": phrase, "seconds": secs})
+			return e.ok("", map[string]any{"phrase": phrase, "seconds": secs})
 		}),
 	}
 }
@@ -715,29 +891,27 @@ func (e *cmds) say() *cobra.Command {
 
 func (e *cmds) openCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "open <app|link>",
-		Aliases: []string{"app", "url"},
-		Short:   "Open an app (by alias, name prefix or package) or a link",
+		Use:         "open <app|link>",
+		Aliases:     []string{"app", "url"},
+		Annotations: meta("", "", wake),
+		Short:       "Open an app (by alias, name prefix or package) or a link",
 		Long: "Apps: " + strings.Join(AliasNames(), ", ") + "; anything else matches the start of an\n" +
-			"app's name (see `tv apps`), or is a package id when it contains a dot.\n" +
-			"Links: YouTube opens in SmartTube; Netflix titles open in Netflix; other\n" +
-			"web pages open in the browser.",
+			"app's name (see `tv apps`), or is an app id when it contains a dot.\n" +
+			"Links: YouTube links play in the YouTube app; Netflix titles open in\n" +
+			"Netflix; other web pages open in the browser.",
 		Args: cobra.ExactArgs(1),
 		RunE: e.run(func(s *session, args []string) error {
 			if isLink(args[0]) {
 				if err := s.openLink(args[0]); err != nil {
 					return err
 				}
-				return e.ok("opened "+args[0], map[string]any{"url": args[0]})
+				return e.done("Opening it on the TV.", map[string]any{"url": args[0]})
 			}
-			id, err := s.resolveApp(args[0])
+			id, name, err := s.openApp(args[0])
 			if err != nil {
 				return err
 			}
-			if err := s.dev.Launch(s.ctx, id); err != nil {
-				return err
-			}
-			return e.ok("launched "+id, map[string]any{"app": id})
+			return e.done("Opening "+name+".", map[string]any{"app": id, "name": name})
 		}),
 	}
 }
@@ -747,7 +921,7 @@ func (e *cmds) apps() *cobra.Command {
 		Use:   "apps",
 		Short: "List apps on the TV",
 		RunE: e.run(func(s *session, _ []string) error {
-			apps, err := AllApps(s.ctx, s.dev, s.rc)
+			apps, err := s.apps()
 			if err != nil {
 				return err
 			}

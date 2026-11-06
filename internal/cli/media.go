@@ -2,7 +2,6 @@ package cli
 
 import (
 	"errors"
-	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -17,55 +16,51 @@ import (
 // deterministic. Without it they fall back to the TV's media keys, which
 // every app honours but which can only toggle or skip.
 
-func (e *cmds) transport(s *session, action string, positionMs int64, fallback device.Key) error {
-	if s.rc != nil {
-		err := s.rc.Control(s.ctx, action, positionMs)
+// transport does one playback action: through the TV's media session when
+// it has one (device.Transport), else with the remote key that means the
+// same thing. what names the action for the error when neither works.
+func (e *cmds) transport(s *session, action, what string, positionMs int64, fallback device.Key) error {
+	if t, ok := s.dev.(device.Transport); ok {
+		err := t.Control(s.ctx, action, positionMs)
 		if err == nil {
-			return e.ok(action, map[string]any{"action": action, "via": "session"})
+			return e.ok("", map[string]any{"action": action, "via": "session"})
 		}
-		if !strings.Contains(err.Error(), "nothing is playing") {
+		if !errors.Is(err, device.ErrNothingPlaying) {
 			return err
 		}
 	}
-	if fallback == "" {
-		return errors.New("needs the companion app (tv setup) or something playing")
+	var err error
+	if fallback != "" {
+		err = s.dev.Key(s.ctx, fallback)
+		if err == nil {
+			return e.ok("", map[string]any{"action": action, "via": "key"})
+		}
 	}
-	if err := s.dev.Key(s.ctx, fallback); err != nil {
+	// No session and no key for it (a time seek anywhere; stop on a TV
+	// whose remote has no Stop): say what would add it, or that it can't.
+	if _, aerr := NeedAddon[device.Transport](s.dev, what); aerr != nil {
+		return aerr
+	}
+	if err != nil {
 		return err
 	}
-	return e.ok(action+" (media key)", map[string]any{"action": action, "via": "key"})
+	return device.ErrNothingPlaying
 }
 
 // transportCmd is the one shape all the simple transport verbs share.
-func (e *cmds) transportCmd(use, short string, aliases []string, action string, fallback device.Key) *cobra.Command {
+func (e *cmds) transportCmd(use, short, action, what string, fallback device.Key) *cobra.Command {
 	return &cobra.Command{
-		Use: use, Aliases: aliases, Short: short, Args: cobra.NoArgs,
-		RunE: e.run(func(s *session, _ []string) error { return e.transport(s, action, 0, fallback) }),
+		Use: use, Short: short, Args: cobra.NoArgs,
+		RunE: e.run(func(s *session, _ []string) error { return e.transport(s, action, what, 0, fallback) }),
 	}
 }
 
 func (e *cmds) pause() *cobra.Command {
-	return e.transportCmd("pause", "Pause whatever is playing", nil, "pause", device.KeyPlayPause)
-}
-
-func (e *cmds) resume() *cobra.Command {
-	return e.transportCmd("resume", "Resume playback", []string{"unpause"}, "play", device.KeyPlayPause)
-}
-
-func (e *cmds) toggle() *cobra.Command {
-	return e.transportCmd("toggle", "Play/pause toggle", []string{"pp"}, "toggle", device.KeyPlayPause)
+	return e.transportCmd("pause", "Pause whatever is playing (play resumes)", "pause", "pausing", device.KeyPlayPause)
 }
 
 func (e *cmds) stop() *cobra.Command {
-	return e.transportCmd("stop", "Stop playback", nil, "stop", "")
-}
-
-func (e *cmds) next() *cobra.Command {
-	return e.transportCmd("next", "Next track / episode (fast-forward without the companion app)", nil, "next", device.KeyFastFwd)
-}
-
-func (e *cmds) prev() *cobra.Command {
-	return e.transportCmd("prev", "Previous track (rewind without the companion app)", []string{"previous"}, "previous", device.KeyRewind)
+	return e.transportCmd("stop", "Stop playback", "stop", "stopping playback", device.KeyStop)
 }
 
 var reClock = regexp.MustCompile(`^(?:(\d+):)?(\d{1,2}):(\d{2})$`)
@@ -81,38 +76,56 @@ func parseSeek(s string) (relative bool, ms int64, err error) {
 	if strings.HasPrefix(s, "+") || strings.HasPrefix(s, "-") {
 		n, err := strconv.Atoi(s)
 		if err != nil {
-			return false, 0, fmt.Errorf("seek: %q is not a number of seconds", s)
+			return false, 0, device.Failf("%s is not a number of seconds", s)
 		}
 		return true, int64(n) * 1000, nil
 	}
 	n, err := strconv.Atoi(s)
 	if err != nil {
-		return false, 0, fmt.Errorf("seek: use +30, -10, 90, or 1:23")
+		return false, 0, device.Fail("seek takes a time like +30, -10, 90, or 1:23")
 	}
 	return false, int64(n) * 1000, nil
 }
 
 func (e *cmds) seek() *cobra.Command {
 	return &cobra.Command{
-		Use:   "seek <+secs|-secs|secs|m:ss|h:mm:ss>",
-		Short: "Seek within what's playing (needs the companion app)",
+		Use:   "seek <next|prev|+secs|-secs|m:ss>",
+		Short: "Next or previous track, or a position within what's playing",
+		Long: `seek next and seek prev skip tracks or episodes (fast-forward and rewind
+keys without the companion app). A time seeks within the current item and
+needs the companion app: +30, -10, 90 (seconds), 1:23 or 1:02:03.`,
+		ValidArgs: []string{"next", "prev"},
 		// "-30" must reach us as a value, not a flag; so parse by hand and
-		// honour --json ourselves.
+		// honour the global flags (--json, --device) ourselves.
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var vals []string
-			for _, a := range args {
-				switch a {
-				case "--json":
+			for i := 0; i < len(args); i++ {
+				a := args[i]
+				switch {
+				case a == "--json":
 					e.env.JSON = true
-				case "--help", "-h":
+				case a == "--help" || a == "-h":
 					return cmd.Help()
+				case (a == "-d" || a == "--device") && i+1 < len(args):
+					i++
+					e.env.Device = args[i]
+				case strings.HasPrefix(a, "--device="):
+					e.env.Device = strings.TrimPrefix(a, "--device=")
 				default:
 					vals = append(vals, a)
 				}
 			}
 			if len(vals) != 1 {
-				return errors.New("seek takes one value: +30, -10, 90, or 1:23")
+				return device.Fail("seek takes one value: next, prev, +30, -10, 90, or 1:23")
+			}
+			switch vals[0] {
+			case "next":
+				return e.run(func(s *session, _ []string) error { return e.transport(s, "next", "skipping", 0, device.KeyFastFwd) })(cmd, nil)
+			case "prev", "previous", "back":
+				return e.run(func(s *session, _ []string) error {
+					return e.transport(s, "previous", "skipping back", 0, device.KeyRewind)
+				})(cmd, nil)
 			}
 			rel, ms, err := parseSeek(vals[0])
 			if err != nil {
@@ -122,7 +135,9 @@ func (e *cmds) seek() *cobra.Command {
 			if rel {
 				action = "seek_by"
 			}
-			return e.run(func(s *session, _ []string) error { return e.transport(s, action, ms, "") })(cmd, nil)
+			return e.run(func(s *session, _ []string) error {
+				return e.transport(s, action, "seeking within what's playing", ms, "")
+			})(cmd, nil)
 		},
 	}
 }

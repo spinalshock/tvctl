@@ -24,6 +24,10 @@ class App : Application() {
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_MIN)
         )
+        // Whatever brings the process up (boot, the accessibility service or
+        // the notification listener restarting after a low-memory kill), the
+        // server comes with it: Fire OS doesn't always restart it on its own.
+        runCatching { ReceiverService.start(this) }
     }
 
     companion object {

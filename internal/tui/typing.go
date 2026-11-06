@@ -11,7 +11,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/receiver"
 )
 
 // Typing mode: while the TV has a text field open, the prompt mirrors it.
@@ -32,10 +31,10 @@ import (
 // hands control back to it when the field closes or on Esc.
 
 type typingState struct {
-	live      bool                 // the companion app is feeding field state
-	sess      *receiver.InputState // last state seen
-	key       string               // the field the box belongs to
-	dismissed string               // field backed out of with Esc: don't re-enter it
+	live      bool          // the companion app is feeding field state
+	sess      *device.Field // last state seen
+	key       string        // the field the box belongs to
+	dismissed string        // field backed out of with Esc: don't re-enter it
 	label     string
 	step      string
 	password  bool
@@ -51,7 +50,7 @@ type typingState struct {
 
 type (
 	// inputMsg carries the field state (nil: unreadable).
-	inputMsg struct{ st *receiver.InputState }
+	inputMsg struct{ st *device.Field }
 	// textSentMsg: one send of the box to the TV finished.
 	textSentMsg struct {
 		sent  string
@@ -68,14 +67,14 @@ type (
 // fetchInput reads the field: at start, and on each keyboard check while
 // the TV has a keyboard up.
 func (m *model) fetchInput() tea.Cmd {
-	rc := m.rc
-	if rc == nil {
+	fr, ok := m.dev.(device.FieldReader)
+	if !ok {
 		return nil
 	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		st, err := rc.Input(ctx)
+		st, err := fr.Field(ctx)
 		if err != nil {
 			return inputMsg{}
 		}
@@ -84,7 +83,7 @@ func (m *model) fetchInput() tea.Cmd {
 }
 
 // onInput applies the TV's field state.
-func (m *model) onInput(st *receiver.InputState) tea.Cmd {
+func (m *model) onInput(st *device.Field) tea.Cmd {
 	if st == nil {
 		return nil
 	}
@@ -137,7 +136,7 @@ func (m *model) onPoll(msg kbMsg) {
 		return
 	}
 	t.kbClosed++
-	if t.kbClosed >= 2 {
+	if t.kbClosed >= 2 && m.typing {
 		m.leaveTyping()
 	}
 }

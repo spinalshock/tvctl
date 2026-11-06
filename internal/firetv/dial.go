@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/omAthalye/tvctl/internal/device"
 )
 
 // DIAL (DIscovery And Launch) is a plain-HTTP protocol on port 8009 that
@@ -51,12 +53,12 @@ func dialLaunchWith(ctx context.Context, host, app, body string, hdr map[string]
 	}
 	resp, err := plainHTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("dial %s: %w", app, err)
+		return device.Failf("couldn't reach %s's app service", host).Because(err)
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != 200 && resp.StatusCode != 201 {
-		return fmt.Errorf("dial %s: HTTP %d", app, resp.StatusCode)
+		return device.Failf("the TV wouldn't start %s", app).Notef("HTTP %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -76,7 +78,7 @@ func dialState(ctx context.Context, host, app string) (string, error) {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+		return "", device.Fail("the TV's app service refused").Notef("HTTP %d", resp.StatusCode)
 	}
 	s := string(b)
 	if i := strings.Index(s, "<state>"); i >= 0 {
