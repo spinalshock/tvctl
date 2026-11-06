@@ -7,3 +7,4 @@ receiver/build/
 receiver/app/build/
 receiver/local.properties
 receiver/.kotlin/
+/CLAUDE.md
