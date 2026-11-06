@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 // nowBar is the two-line now-playing block under the header. It owns the

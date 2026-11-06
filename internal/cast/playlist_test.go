@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 type fakePlayer struct{ urls []string }

@@ -3,10 +3,10 @@ package firetv
 import (
 	"context"
 
-	"github.com/omAthalye/tvctl/internal/android"
-	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/receiver"
-	"github.com/omAthalye/tvctl/internal/youtube"
+	"github.com/spinalshock/tvctl/internal/android"
+	"github.com/spinalshock/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/receiver"
+	"github.com/spinalshock/tvctl/internal/youtube"
 )
 
 // withCompanion is a Fire TV that has the companion app installed: the

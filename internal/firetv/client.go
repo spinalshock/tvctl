@@ -30,9 +30,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/netx"
-	"github.com/omAthalye/tvctl/internal/wol"
+	"github.com/spinalshock/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/netx"
+	"github.com/spinalshock/tvctl/internal/wol"
 )
 
 const (

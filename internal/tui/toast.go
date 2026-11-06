@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 // The toast: a command's outcome worth announcing ("launched Netflix",

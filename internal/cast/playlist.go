@@ -21,7 +21,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 // videoExts is what Expand picks out of a directory. Players handle more,

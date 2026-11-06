@@ -10,7 +10,7 @@ import (
 
 	"github.com/grandcat/zeroconf"
 
-	"github.com/omAthalye/tvctl/internal/netx"
+	"github.com/spinalshock/tvctl/internal/netx"
 )
 
 // Found is a discovered Fire TV before pairing.

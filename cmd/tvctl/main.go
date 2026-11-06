@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/omAthalye/tvctl/internal/cli"
+	"github.com/spinalshock/tvctl/internal/cli"
 )
 
 func main() {

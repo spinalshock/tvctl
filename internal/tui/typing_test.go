@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 func newTypingModel() *model {

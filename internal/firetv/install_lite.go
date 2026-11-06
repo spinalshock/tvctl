@@ -6,7 +6,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 // InstallCompanion in the lite build says where to do it instead. The

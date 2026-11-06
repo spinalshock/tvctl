@@ -1,4 +1,4 @@
-module github.com/omAthalye/tvctl
+module github.com/spinalshock/tvctl
 
 go 1.26.0
 

@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/receiver"
+	"github.com/spinalshock/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/receiver"
 )
 
 func init() {

@@ -6,7 +6,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/omAthalye/tvctl/internal/setup"
+	"github.com/spinalshock/tvctl/internal/setup"
 )
 
 // InstallCompanion is the one ADB step: install or update the app, grant

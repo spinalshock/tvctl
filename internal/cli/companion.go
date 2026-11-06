@@ -10,9 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/omAthalye/tvctl/internal/cast"
-	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/receiver"
+	"github.com/spinalshock/tvctl/internal/cast"
+	"github.com/spinalshock/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/receiver"
 )
 
 // Verbs whose capability usually comes from the companion add-on. They

@@ -3,7 +3,7 @@ package webos
 import (
 	"testing"
 
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 func TestNamesAndStates(t *testing.T) {

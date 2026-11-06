@@ -1,6 +1,6 @@
 package firetv
 
-import "github.com/omAthalye/tvctl/internal/android"
+import "github.com/spinalshock/tvctl/internal/android"
 
 // Fire TV's app list (appsV2) omits Amazon's own apps and sideloaded ones,
 // so well-known names are answered from the Android table first.

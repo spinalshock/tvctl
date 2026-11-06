@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/omAthalye/tvctl/internal/config"
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/config"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 // Errors are written for terminals; the spoken form is the first clause,

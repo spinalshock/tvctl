@@ -3,7 +3,7 @@ package firetv
 import (
 	"context"
 	"errors"
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/device"
 	"testing"
 	"time"
 )

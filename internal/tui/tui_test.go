@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/omAthalye/tvctl/internal/cli"
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/cli"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 // TestResolve pins the precedence rule: built-in, alias (bare opens, with

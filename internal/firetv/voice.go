@@ -9,8 +9,8 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/tts"
+	"github.com/spinalshock/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/tts"
 )
 
 // Say delivers a phrase to Alexa as if spoken into the remote's microphone.

@@ -4,7 +4,7 @@ package wol
 
 import (
 	"bytes"
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/device"
 	"net"
 )
 

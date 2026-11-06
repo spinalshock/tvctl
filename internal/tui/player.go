@@ -11,9 +11,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/omAthalye/tvctl/internal/cast"
-	"github.com/omAthalye/tvctl/internal/cli"
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/cast"
+	"github.com/spinalshock/tvctl/internal/cli"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 // player owns what the TUI does with local files and screenshots: the yazi

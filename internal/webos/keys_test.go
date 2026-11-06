@@ -3,7 +3,7 @@ package webos
 import (
 	"testing"
 
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 // Every key in the shared vocabulary reaches the TV one way or another.

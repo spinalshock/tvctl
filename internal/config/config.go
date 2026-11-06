@@ -13,7 +13,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 // Entry is one paired TV. Token is whatever the driver's Pair returned and is

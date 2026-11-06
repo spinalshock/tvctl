@@ -29,10 +29,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/omAthalye/tvctl/internal/config"
-	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/netx"
-	"github.com/omAthalye/tvctl/internal/youtube"
+	"github.com/spinalshock/tvctl/internal/config"
+	"github.com/spinalshock/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/netx"
+	"github.com/spinalshock/tvctl/internal/youtube"
 )
 
 // Nothing in this package names a brand. Drivers register themselves

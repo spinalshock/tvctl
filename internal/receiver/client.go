@@ -18,9 +18,9 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/omAthalye/tvctl/internal/android"
-	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/netx"
+	"github.com/spinalshock/tvctl/internal/android"
+	"github.com/spinalshock/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/netx"
 )
 
 const (

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 // DIAL (DIscovery And Launch) is a plain-HTTP protocol on port 8009 that

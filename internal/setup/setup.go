@@ -16,11 +16,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/omAthalye/tvctl/internal/adb"
-	"github.com/omAthalye/tvctl/internal/config"
-	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/netx"
-	"github.com/omAthalye/tvctl/internal/receiver"
+	"github.com/spinalshock/tvctl/internal/adb"
+	"github.com/spinalshock/tvctl/internal/config"
+	"github.com/spinalshock/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/netx"
+	"github.com/spinalshock/tvctl/internal/receiver"
 )
 
 //go:embed receiver.apk

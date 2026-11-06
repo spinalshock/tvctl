@@ -12,9 +12,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/omAthalye/tvctl/internal/adb"
-	"github.com/omAthalye/tvctl/internal/config"
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/adb"
+	"github.com/spinalshock/tvctl/internal/config"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 // shell runs one command on the TV over ADB with tvctl's own key, the one

@@ -9,7 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/omAthalye/tvctl/internal/cli"
+	"github.com/spinalshock/tvctl/internal/cli"
 )
 
 // builtins are the prompt-only words the TUI handles itself; everything

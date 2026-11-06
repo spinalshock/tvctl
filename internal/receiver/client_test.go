@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 func TestDescribe(t *testing.T) {

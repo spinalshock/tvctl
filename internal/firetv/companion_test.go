@@ -3,7 +3,7 @@ package firetv
 import (
 	"testing"
 
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 // A Fire TV's capabilities depend on whether the companion app is there:

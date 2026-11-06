@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/omAthalye/tvctl/internal/netx"
+	"github.com/spinalshock/tvctl/internal/netx"
 )
 
 // Found is a discovered LG TV before pairing.

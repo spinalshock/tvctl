@@ -38,9 +38,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/omAthalye/tvctl/internal/cli"
-	"github.com/omAthalye/tvctl/internal/config"
-	"github.com/omAthalye/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/cli"
+	"github.com/spinalshock/tvctl/internal/config"
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 var debugLog io.Writer

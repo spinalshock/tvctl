@@ -6,8 +6,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/omAthalye/tvctl/internal/device"
-	"github.com/omAthalye/tvctl/internal/youtube"
+	"github.com/spinalshock/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/youtube"
 )
 
 // OpenURL routes a web link to the matching TV app. Without ADB the only
