@@ -10,10 +10,16 @@ import "net"
 // The interface list is the honest answer. Android refuses it to apps
 // (netlink: permission denied, Termux included), so there the kernel is
 // asked which source address it would use for host; a UDP "dial" sends
-// nothing. A Tailscale/CGNAT source means the host is reached over the
-// tailnet, not this LAN. Otherwise, with no netmask to go by, sharing a
-// /24 (or /64) with the source address is the best guess; home networks
-// are /24.
+// nothing. With no netmask to go by, sharing a /24 (or /64) with the
+// machine's own address is the best guess; home networks are /24.
+//
+// Two source addresses are consulted, because a tailnet can claim the
+// LAN itself: when a subnet router advertises this very network, even
+// the TV next door is routed into the tunnel and its source is the
+// Tailscale address. So first the source for the default route (an
+// address nothing advertises) gives the LAN address, and a TV in its /24
+// is local. Then the host's own source decides: Tailscale/CGNAT means it
+// is reached over the tailnet, not from here.
 func OnLocalNet(host string) bool {
 	ip := net.ParseIP(host)
 	if ip == nil {
@@ -27,8 +33,16 @@ func OnLocalNet(host string) bool {
 		}
 		return false
 	}
+	if lan := sourceFor(defaultRouteProbe); lan != nil && !cgnat.Contains(lan) && samePrefix(ip, lan) {
+		return true
+	}
 	return localByRoute(ip, sourceFor(ip))
 }
+
+// defaultRouteProbe is TEST-NET-1 (RFC 5737): never assigned, never
+// advertised by a subnet router, so the kernel answers with the default
+// route's source address, the LAN one. Nothing is sent to it.
+var defaultRouteProbe = net.IPv4(192, 0, 2, 1)
 
 // Swapped out by tests.
 var (
@@ -61,8 +75,13 @@ func localByRoute(ip, src net.IP) bool {
 	if cgnat.Contains(src) {
 		return false
 	}
-	if ip4, src4 := ip.To4(), src.To4(); ip4 != nil && src4 != nil {
-		return ip4.Mask(net.CIDRMask(24, 32)).Equal(src4.Mask(net.CIDRMask(24, 32)))
+	return samePrefix(ip, src)
+}
+
+// samePrefix is the /24 (IPv4) or /64 (IPv6) guess at "same network".
+func samePrefix(a, b net.IP) bool {
+	if a4, b4 := a.To4(), b.To4(); a4 != nil && b4 != nil {
+		return a4.Mask(net.CIDRMask(24, 32)).Equal(b4.Mask(net.CIDRMask(24, 32)))
 	}
-	return ip.Mask(net.CIDRMask(64, 128)).Equal(src.Mask(net.CIDRMask(64, 128)))
+	return a.Mask(net.CIDRMask(64, 128)).Equal(b.Mask(net.CIDRMask(64, 128)))
 }

@@ -127,8 +127,11 @@ against a fake driver only.
   (`/proc/net/arp`, which Android restricts) is not needed for the LG.
 - Android also refuses the interface list to apps (netlink permission
   denied), which is how "which TV is local" is normally decided. tvctl then
-  asks the kernel which source address it would use for each TV: a
-  Tailscale address means not local, the same /24 as the TV means local.
+  asks the kernel for source addresses instead: the default route's source
+  is the Wi-Fi address, and a TV in its /24 is local even when a Tailscale
+  subnet route for that very LAN pulls the traffic into the tunnel; failing
+  that, a TV whose own source is a Tailscale address is not local. Behind
+  an exit node nothing can be told apart and the default TV wins; pass -d.
   Fixed 7 Nov 2026 after the phone kept picking the other home's TV.
 - Keep the phone awake and online: `termux-wake-lock`, battery optimisation
   off for Termux, Termux:Boot to start the assistant loop, and

@@ -38,7 +38,7 @@ func TestOnLocalNetWithoutInterfaceList(t *testing.T) {
 		if ip.String() == "192.168.29.76" {
 			return net.ParseIP("192.168.29.197") // on the Wi-Fi
 		}
-		return net.ParseIP("100.101.102.103") // via the subnet router
+		return net.ParseIP("100.101.102.103") // via the subnet router, and no default route
 	}
 	if !OnLocalNet("192.168.29.76") {
 		t.Error("the TV on this Wi-Fi should count as local")
@@ -48,6 +48,38 @@ func TestOnLocalNetWithoutInterfaceList(t *testing.T) {
 	}
 	if !OnLocalNet("living-room-tv") {
 		t.Error("a hostname counts as local")
+	}
+}
+
+// Seen on the phone, 7 Nov 2026: the tailnet advertises the phone's own
+// LAN, so the TV next door is routed into the tunnel, while the other
+// home's TV (not advertised) leaves by the default route. The default
+// route's source address is what tells the two apart.
+func TestOnLocalNetWhenTailnetClaimsOwnLAN(t *testing.T) {
+	savedAddrs, savedSrc := interfaceAddrs, sourceFor
+	defer func() { interfaceAddrs, sourceFor = savedAddrs, savedSrc }()
+	interfaceAddrs = func() ([]net.Addr, error) { return nil, errors.New("route ip+net: netlinkrib: permission denied") }
+	sourceFor = func(ip net.IP) net.IP {
+		switch ip.String() {
+		case "192.168.29.76":
+			return net.ParseIP("100.79.89.84") // the LG, via the subnet route for 192.168.29.0/24
+		case "192.168.0.106":
+			return net.ParseIP("192.168.29.197") // the Fire TV in the other home: default route, unreachable
+		default:
+			return net.ParseIP("192.168.29.197") // default route: the Wi-Fi address
+		}
+	}
+	if !OnLocalNet("192.168.29.76") {
+		t.Error("the TV in this home is local even though the tailnet carries it")
+	}
+	if OnLocalNet("192.168.0.106") {
+		t.Error("the other home's TV is not local")
+	}
+	// With an exit node everything leaves through the tunnel and the LAN
+	// address is unknowable; then nothing can count as local.
+	sourceFor = func(net.IP) net.IP { return net.ParseIP("100.79.89.84") }
+	if OnLocalNet("192.168.29.76") || OnLocalNet("192.168.0.106") {
+		t.Error("behind an exit node no TV can be told to be local")
 	}
 }
 
