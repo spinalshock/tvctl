@@ -6,7 +6,6 @@ package config
 import (
 	"encoding/json"
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/spinalshock/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/netx"
 )
 
 // Entry is one paired TV. Token is whatever the driver's Pair returned and is
@@ -162,22 +162,5 @@ func (s *Store) Resolve(sel string) (string, Entry, error) {
 	return "", Entry{}, device.Failf("no TV called %s", sel)
 }
 
-// onLocalNet reports whether host is inside a subnet of one of this
-// machine's interfaces. A hostname or an unreadable interface list counts
-// as local, so this only ever steers away from a TV that clearly isn't here.
-var onLocalNet = func(host string) bool {
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return true
-	}
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return true
-	}
-	for _, a := range addrs {
-		if n, ok := a.(*net.IPNet); ok && !n.IP.IsLoopback() && n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
+// onLocalNet is netx.OnLocalNet, a variable so tests can pick the network.
+var onLocalNet = netx.OnLocalNet

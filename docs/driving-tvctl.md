@@ -125,6 +125,11 @@ against a fake driver only.
   installer with its embedded APK.
 - The webOS driver asks the TV for its MAC, so the ARP fallback
   (`/proc/net/arp`, which Android restricts) is not needed for the LG.
+- Android also refuses the interface list to apps (netlink permission
+  denied), which is how "which TV is local" is normally decided. tvctl then
+  asks the kernel which source address it would use for each TV: a
+  Tailscale address means not local, the same /24 as the TV means local.
+  Fixed 7 Nov 2026 after the phone kept picking the other home's TV.
 - Keep the phone awake and online: `termux-wake-lock`, battery optimisation
   off for Termux, Termux:Boot to start the assistant loop, and
   `termux-services` (runit) if the loop should be a supervised service.
