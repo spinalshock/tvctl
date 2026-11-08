@@ -2,12 +2,15 @@ package webos
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"strings"
 	"time"
 
 	"github.com/spinalshock/tvctl/internal/device"
 	"github.com/spinalshock/tvctl/internal/dial"
 	"github.com/spinalshock/tvctl/internal/netx"
+	"github.com/spinalshock/tvctl/internal/trace"
 	"github.com/spinalshock/tvctl/internal/wol"
 	"github.com/spinalshock/tvctl/internal/youtube"
 )
@@ -293,7 +296,7 @@ func (c *Client) Launch(ctx context.Context, appID string) error {
 // (a channel) opens the app.
 func (c *Client) OpenURL(ctx context.Context, link string) error {
 	if id, start := youtube.VideoID(link); id != "" {
-		apps, err := dial.Find(ctx, c.Host, 3*time.Second)
+		apps, err := c.dialApps(ctx)
 		if err != nil {
 			return err
 		}
@@ -312,6 +315,22 @@ func (c *Client) OpenURL(ctx context.Context, link string) error {
 }
 
 const youTubeApp = "youtube.leanback.v4"
+
+// dialPort is where every webOS TV seen so far serves DIAL. It is tried
+// first, one HTTP request, so playing a video needs no SSDP on the LAN;
+// a TV that has moved it is found by SSDP as any other brand would be.
+const dialPort = 36866
+
+func (c *Client) dialApps(ctx context.Context) (string, error) {
+	apps := fmt.Sprintf("http://%s/apps", net.JoinHostPort(c.Host, fmt.Sprint(dialPort)))
+	pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if _, err := dial.State(pctx, apps, "YouTube", map[string]string{"Origin": "https://www.youtube.com"}); err == nil {
+		trace.Logf("webos: DIAL on the usual port %d", dialPort)
+		return apps, nil
+	}
+	return dial.Find(ctx, c.Host, 3*time.Second)
+}
 
 // Status is whatever system and software information the TV lets this
 // pairing read; newer firmware withholds some (system info needs a signed
