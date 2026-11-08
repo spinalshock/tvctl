@@ -78,8 +78,8 @@ func (c *Client) Asleep(ctx context.Context) bool {
 	return err != nil || !awake(state)
 }
 
-// powerState is the TV's own word for it: "Active", "Active Standby",
-// "Suspend", "Screen Off".
+// powerState is the TV's own word for it: "Active", "Screen Saver",
+// "Screen Off", "Active Standby", "Suspend".
 func (c *Client) powerState(ctx context.Context) (string, error) {
 	var r struct {
 		State string `json:"state"`
@@ -88,7 +88,15 @@ func (c *Client) powerState(ctx context.Context) (string, error) {
 	return r.State, err
 }
 
-func awake(state string) bool { return state == "Active" || state == "Screen Off" }
+// awake is any state in which the TV takes commands. The screen saver
+// and a blanked screen are still on; any launch or key clears them.
+func awake(state string) bool {
+	switch state {
+	case "Active", "Screen Saver", "Screen Off":
+		return true
+	}
+	return false
+}
 
 func (c *Client) Info() device.Info {
 	id := c.ID

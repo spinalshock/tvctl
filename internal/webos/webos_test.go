@@ -48,3 +48,16 @@ func TestNamesAndStates(t *testing.T) {
 		t.Error("webOS must not claim it can take the companion app")
 	}
 }
+
+// The screen saver once counted as asleep, so every verb that wakes the
+// TV first spent its whole budget sending Wake-on-LAN to a TV that was on.
+func TestAwakeStates(t *testing.T) {
+	for state, want := range map[string]bool{
+		"Active": true, "Screen Saver": true, "Screen Off": true,
+		"Active Standby": false, "Suspend": false, "Power Off": false, "": false,
+	} {
+		if got := awake(state); got != want {
+			t.Errorf("awake(%q) = %v, want %v", state, got, want)
+		}
+	}
+}
