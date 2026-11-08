@@ -91,34 +91,37 @@ func stateIn(xml string) string {
 
 // Find asks host for its DIAL apps URL: an SSDP search answered with the
 // device description's location, whose response carries the
-// Application-URL header. The host is asked directly first (works where
-// multicast doesn't), then by multicast. Bounded by timeout.
+// Application-URL header. The host is asked directly and by multicast at
+// the same time, first answer wins: a TV reached through a tunnel never
+// answers the direct ask, and Android sometimes can't multicast, so each
+// covers the other without costing a wait. Bounded by timeout.
 func Find(ctx context.Context, host string, timeout time.Duration) (string, error) {
 	sctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var (
 		mu  sync.Mutex
 		loc string
+		how string
 	)
-	hit := func(ip string, h textproto.MIMEHeader) {
-		if ip != host || h.Get("Location") == "" {
-			return
+	hit := func(via string) func(ip string, h textproto.MIMEHeader) {
+		return func(ip string, h textproto.MIMEHeader) {
+			if ip != host || h.Get("Location") == "" {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if loc == "" {
+				loc, how = h.Get("Location"), via
+				cancel() // one answer is all that's needed
+			}
 		}
-		mu.Lock()
-		if loc == "" {
-			loc = h.Get("Location")
-			cancel() // one answer is all that's needed
-		}
-		mu.Unlock()
 	}
-	netx.SSDPAt(sctx, host, ServiceType, hit)
-	trace.Logf("dial: direct SSDP to %s answered=%v", host, loc != "")
-	if loc == "" && ctx.Err() == nil {
-		sctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-		netx.SSDP(sctx, ServiceType, hit)
-		trace.Logf("dial: multicast SSDP answered=%v", loc != "")
-	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); netx.SSDPAt(sctx, host, ServiceType, hit("direct")) }()
+	go func() { defer wg.Done(); netx.SSDP(sctx, ServiceType, hit("multicast")) }()
+	wg.Wait()
+	trace.Logf("dial: SSDP answered=%v via %s", loc != "", how)
 	if loc == "" {
 		return "", device.Fail("the TV doesn't offer app casting").Note("no DIAL service answered")
 	}
