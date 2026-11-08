@@ -19,6 +19,7 @@ import (
 
 	"github.com/spinalshock/tvctl/internal/device"
 	"github.com/spinalshock/tvctl/internal/netx"
+	"github.com/spinalshock/tvctl/internal/trace"
 )
 
 // ServiceType is the SSDP search target every DIAL server answers.
@@ -111,15 +112,19 @@ func Find(ctx context.Context, host string, timeout time.Duration) (string, erro
 		mu.Unlock()
 	}
 	netx.SSDPAt(sctx, host, ServiceType, hit)
+	trace.Logf("dial: direct SSDP to %s answered=%v", host, loc != "")
 	if loc == "" && ctx.Err() == nil {
 		sctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 		netx.SSDP(sctx, ServiceType, hit)
+		trace.Logf("dial: multicast SSDP answered=%v", loc != "")
 	}
 	if loc == "" {
 		return "", device.Fail("the TV doesn't offer app casting").Note("no DIAL service answered")
 	}
-	return appsFrom(ctx, loc)
+	apps, err := appsFrom(ctx, loc)
+	trace.Logf("dial: apps URL %q err=%v", apps, err)
+	return apps, err
 }
 
 // appsFrom reads the Application-URL header off a device description.

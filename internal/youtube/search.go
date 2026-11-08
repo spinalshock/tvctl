@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spinalshock/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/trace"
 )
 
 // Result is one search hit.
@@ -49,6 +50,7 @@ func Search(ctx context.Context, q string, limit int) ([]Result, error) {
 			continue
 		}
 		out, hasData = parseResults(body, limit)
+		trace.Logf("search: page %d fetched, %d results, data=%v", attempt+1, len(out), hasData)
 		if len(out) > 0 || hasData {
 			break
 		}

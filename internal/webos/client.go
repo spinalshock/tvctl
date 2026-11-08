@@ -16,6 +16,7 @@ import (
 
 	"github.com/spinalshock/tvctl/internal/device"
 	"github.com/spinalshock/tvctl/internal/netx"
+	"github.com/spinalshock/tvctl/internal/trace"
 )
 
 // LG's second-screen API (SSAP): JSON requests over a WebSocket on :3001
@@ -175,6 +176,7 @@ func (c *Client) register(ctx context.Context) (*conn, string, error) {
 	if err != nil {
 		return nil, "", device.Failf("%s is off or unreachable", c.name()).Note(c.Host).Because(err)
 	}
+	trace.Logf("webos: socket to %s open", c.Host)
 	cn := &conn{ws: ws}
 	if err := send(ctx, ws, map[string]any{"id": "hello", "type": "hello", "payload": map[string]any{}}); err != nil {
 		ws.CloseNow() // accepted the socket and dropped it: LG in standby does this

@@ -32,6 +32,7 @@ import (
 	"github.com/spinalshock/tvctl/internal/config"
 	"github.com/spinalshock/tvctl/internal/device"
 	"github.com/spinalshock/tvctl/internal/netx"
+	"github.com/spinalshock/tvctl/internal/trace"
 	"github.com/spinalshock/tvctl/internal/youtube"
 )
 
@@ -222,6 +223,7 @@ func (e *cmds) openSession(cmd *cobra.Command) (*session, context.CancelFunc, er
 	if err != nil {
 		return nil, nil, err
 	}
+	trace.Logf("cli: using %s (%s)", ent.Name, ent.Host)
 	d, err := device.Open(DeviceConfig(id, ent))
 	if err != nil {
 		return nil, nil, err
@@ -247,6 +249,7 @@ func (e *cmds) run(f func(s *session, args []string) error) func(*cobra.Command,
 			}
 		}
 		err = f(s, args)
+		trace.Logf("cli: verb finished err=%v", err)
 		if errors.Is(err, context.DeadlineExceeded) || (err != nil && s.ctx.Err() == context.DeadlineExceeded) {
 			return device.Failf("%s didn't answer in time", tvName(s.dev))
 		}
@@ -287,7 +290,12 @@ func learnMAC(ctx context.Context, dev device.Device, host string) string {
 func (s *session) wakeIfAsleep(cmd *cobra.Command) error {
 	sl, ok := s.dev.(device.Sleeper)
 	w, canWake := s.dev.(device.Waker)
-	if !ok || !canWake || !sl.Asleep(s.base) {
+	if !ok || !canWake {
+		return nil
+	}
+	asleep := sl.Asleep(s.base)
+	trace.Logf("cli: asleep check done, asleep=%v", asleep)
+	if !asleep {
 		return nil
 	}
 	wcx, wcancel := context.WithTimeout(s.base, 30*time.Second)

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/spinalshock/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/trace"
 )
 
 const (
@@ -47,6 +48,7 @@ func Play(ctx context.Context, launch Launcher, videoID string, startSeconds int
 	if err := launch(ctx, "YouTube", "pairingCode="+code+"&theme=cl", map[string]string{"Origin": dialOrigin}); err != nil {
 		return device.Fail("couldn't start YouTube on the TV").Because(err)
 	}
+	trace.Logf("lounge: YouTube launched over DIAL")
 	// The TV registers the code asynchronously, and slowly when the app is
 	// already busy playing; poll for up to ~15 s.
 	var tok string
@@ -54,6 +56,7 @@ func Play(ctx context.Context, launch Launcher, videoID string, startSeconds int
 	for i := 0; i < 20; i++ {
 		tok, err = screenToken(ctx, code)
 		if err == nil {
+			trace.Logf("lounge: screen token after %d polls", i+1)
 			break
 		}
 		select {
@@ -71,9 +74,11 @@ func Play(ctx context.Context, launch Launcher, videoID string, startSeconds int
 	for attempt := 0; attempt < 2; attempt++ {
 		s, err := bind(ctx, tok)
 		if err == nil {
+			trace.Logf("lounge: session bound")
 			err = s.setPlaylist(ctx, videoID, startSeconds)
 		}
 		if err == nil {
+			trace.Logf("lounge: play accepted")
 			return nil
 		}
 		last = err
