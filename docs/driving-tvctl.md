@@ -137,6 +137,10 @@ against a fake driver only.
   that, a TV whose own source is a Tailscale address is not local. Behind
   an exit node nothing can be told apart and the default TV wins; pass -d.
   Fixed 7 Nov 2026 after the phone kept picking the other home's TV.
+- Android also has no /etc/resolv.conf, which leaves Go's resolver with
+  nowhere to send lookups; tvctl reads Termux's resolv.conf (or falls back
+  to public resolvers) so YouTube search and casting resolve. LAN traffic
+  by IP never depended on this. Fixed 8 Nov 2026.
 - Keep the phone awake and online: `termux-wake-lock`, battery optimisation
   off for Termux, Termux:Boot to start the assistant loop, and
   `termux-services` (runit) if the loop should be a supervised service.

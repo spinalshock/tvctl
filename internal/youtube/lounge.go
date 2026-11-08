@@ -20,7 +20,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,6 +27,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/spinalshock/tvctl/internal/device"
 )
 
 const (
@@ -44,7 +45,7 @@ type Launcher func(ctx context.Context, app, body string, hdr map[string]string)
 func Play(ctx context.Context, launch Launcher, videoID string, startSeconds int) error {
 	code := uuid()
 	if err := launch(ctx, "YouTube", "pairingCode="+code+"&theme=cl", map[string]string{"Origin": dialOrigin}); err != nil {
-		return fmt.Errorf("launch YouTube: %w", err)
+		return device.Fail("couldn't start YouTube on the TV").Because(err)
 	}
 	// The TV registers the code asynchronously, and slowly when the app is
 	// already busy playing; poll for up to ~15 s.
@@ -62,7 +63,7 @@ func Play(ctx context.Context, launch Launcher, videoID string, startSeconds int
 		}
 	}
 	if err != nil {
-		return fmt.Errorf("YouTube did not register the TV: %w", err)
+		return device.Fail("YouTube didn't recognise the TV").Note("the TV's YouTube app never registered with YouTube").Because(err)
 	}
 	// The lounge endpoints occasionally answer a fresh session with an
 	// HTML error page; one retry after a short pause clears it.
@@ -96,7 +97,7 @@ func screenToken(ctx context.Context, code string) (string, error) {
 		return "", err
 	}
 	if res.Screen.LoungeToken == "" {
-		return "", errors.New("no lounge token in response")
+		return "", device.Fail("YouTube gave an unexpected answer").Note("no lounge token in response")
 	}
 	return res.Screen.LoungeToken, nil
 }
@@ -119,14 +120,14 @@ func bind(ctx context.Context, token string) (*session, error) {
 	q := s.query()
 	body, err := postRaw(ctx, loungeBase+"/bc/bind?"+q.Encode(), url.Values{"count": {"0"}})
 	if err != nil {
-		return nil, fmt.Errorf("lounge bind: %w", err)
+		return nil, device.Fail("couldn't reach YouTube").Because(err)
 	}
 	// The response is a chunked stream of JSON arrays prefixed by byte
 	// lengths. We only need two values from the first chunk.
 	m := reSID.FindStringSubmatch(body)
 	g := reGS.FindStringSubmatch(body)
 	if m == nil || g == nil {
-		return nil, fmt.Errorf("lounge bind: unexpected response %.120q", body)
+		return nil, device.Fail("YouTube gave an unexpected answer").Notef("bind: %.120q", body)
 	}
 	s.sid, s.gsession = m[1], g[1]
 	return s, nil
@@ -172,7 +173,7 @@ func (s *session) setPlaylist(ctx context.Context, videoID string, start int) er
 	}
 	_, err := postRaw(ctx, loungeBase+"/bc/bind?"+s.query().Encode(), form)
 	if err != nil {
-		return fmt.Errorf("lounge play: %w", err)
+		return device.Fail("YouTube didn't take the video").Because(err)
 	}
 	return nil
 }
@@ -195,9 +196,9 @@ func postRaw(ctx context.Context, u string, form url.Values) (string, error) {
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode/100 != 2 {
 		if strings.Contains(strings.ToLower(string(b[:min(len(b), 200)])), "<html") {
-			return "", fmt.Errorf("YouTube API returned HTTP %d", resp.StatusCode)
+			return "", device.Fail("YouTube refused").Notef("HTTP %d", resp.StatusCode)
 		}
-		return "", fmt.Errorf("YouTube API HTTP %d: %.200s", resp.StatusCode, b)
+		return "", device.Fail("YouTube refused").Notef("HTTP %d: %.200s", resp.StatusCode, b)
 	}
 	return string(b), nil
 }
