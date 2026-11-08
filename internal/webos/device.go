@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/spinalshock/tvctl/internal/device"
+	"github.com/spinalshock/tvctl/internal/dial"
 	"github.com/spinalshock/tvctl/internal/netx"
 	"github.com/spinalshock/tvctl/internal/wol"
 	"github.com/spinalshock/tvctl/internal/youtube"
@@ -284,9 +285,23 @@ func (c *Client) Launch(ctx context.Context, appID string) error {
 	return c.request(ctx, "system.launcher/launch", map[string]any{"id": appID}, nil)
 }
 
-// OpenURL plays YouTube links in LG's YouTube app and hands anything else
-// to the TV's browser.
+// OpenURL plays YouTube videos through YouTube's casting flow and hands
+// anything else to the TV's browser. Launching LG's YouTube app with the
+// link as a parameter only opens the app, in every form tried (watch,
+// tv, youtu.be, contentId); the cast path is the one that plays, the
+// same one the Fire TV driver uses. A YouTube link with no video in it
+// (a channel) opens the app.
 func (c *Client) OpenURL(ctx context.Context, link string) error {
+	if id, start := youtube.VideoID(link); id != "" {
+		apps, err := dial.Find(ctx, c.Host, 3*time.Second)
+		if err != nil {
+			return err
+		}
+		launch := func(ctx context.Context, app, body string, hdr map[string]string) error {
+			return dial.Launch(ctx, apps, app, body, hdr)
+		}
+		return youtube.Play(ctx, launch, id, start)
+	}
 	if youtube.IsLink(link) {
 		return c.request(ctx, "system.launcher/launch", map[string]any{
 			"id":     youTubeApp,

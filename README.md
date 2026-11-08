@@ -137,8 +137,11 @@ brand; they ask the device what it can do. Start from
 - Wake-on-LAN needs the TV's MAC, which tvctl learns on pairing or after
   the first successful command, and the TV's own "turn on via network"
   setting (LG calls it Turn on via Wi-Fi).
-- On Fire TV the `youtube` alias opens SmartTube, an ad-free client, by
-  choice. Change the table in `internal/android` if you use another.
+- YouTube videos play through YouTube's own casting flow (DIAL plus the
+  lounge API) on every brand, which needs no account; `tv youtube <words>`
+  plays the top search hit. On Fire TV the `youtube` alias opens SmartTube,
+  an ad-free client, by choice; change the table in `internal/android` if
+  you use another.
 - `shot` shows black over DRM video; menus and most apps are fine.
 - The companion app runs an accessibility service to read the on-screen
   keyboard and now-playing; it serves HTTP on the LAN with the token tvctl

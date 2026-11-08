@@ -22,3 +22,17 @@ func TestLinks(t *testing.T) {
 		t.Error("IsLink")
 	}
 }
+
+func TestParseResultsTellsEmptyFromBroken(t *testing.T) {
+	page := `var ytInitialData = {"contents":[{"videoRenderer":{"videoId":"kmjeMrjOjFA","title":{"runs":[{"text":"Taambdi \"Chaamdi\""}]}}},{"videoRenderer":{"videoId":"kmjeMrjOjFA"}},{"videoRenderer":{"videoId":"dQw4w9WgXcQ","title":{"runs":[{"text":"Second"}]}}}]}`
+	res, hasData := parseResults(page, 5)
+	if !hasData || len(res) != 2 || res[0].ID != "kmjeMrjOjFA" || res[0].Title != `Taambdi "Chaamdi"` || res[1].Title != "Second" {
+		t.Errorf("got %+v hasData=%v", res, hasData)
+	}
+	if res, hasData := parseResults("<html>consent</html>", 5); hasData || len(res) != 0 {
+		t.Errorf("a page without data must not look like an empty result: %+v %v", res, hasData)
+	}
+	if res, hasData := parseResults(`var ytInitialData = {"contents":[]}`, 5); !hasData || len(res) != 0 {
+		t.Errorf("an empty result set has data: %+v %v", res, hasData)
+	}
+}

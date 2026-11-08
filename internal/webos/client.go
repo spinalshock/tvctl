@@ -124,7 +124,7 @@ var (
 	dialMu  sync.Mutex           // one registration at a time; the TUI's pollers overlap
 )
 
-func dial(ctx context.Context, url string) (*websocket.Conn, error) {
+func connect(ctx context.Context, url string) (*websocket.Conn, error) {
 	ws, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
 		HTTPClient: &http.Client{Transport: &http.Transport{
 			// The TV's certificate is self-signed for its LAN address;
@@ -171,7 +171,7 @@ func recv(ctx context.Context, ws *websocket.Conn) (*message, error) {
 // register opens a connection and registers it. With no key the TV shows
 // its Allow prompt and this waits for the owner's answer.
 func (c *Client) register(ctx context.Context) (*conn, string, error) {
-	ws, err := dial(ctx, fmt.Sprintf("wss://%s:%d", c.Host, port))
+	ws, err := connect(ctx, fmt.Sprintf("wss://%s:%d", c.Host, port))
 	if err != nil {
 		return nil, "", device.Failf("%s is off or unreachable", c.name()).Note(c.Host).Because(err)
 	}
@@ -366,7 +366,7 @@ func (cn *conn) press(ctx context.Context, name string) error {
 		if _, err := cn.callInto(ctx, "com.webos.service.networkinput/getPointerInputSocket", &s); err != nil {
 			return device.Fail("remote buttons unavailable").Because(err)
 		}
-		ws, err := dial(ctx, s.Path)
+		ws, err := connect(ctx, s.Path)
 		if err != nil {
 			return device.Fail("remote buttons unavailable").Because(err)
 		}

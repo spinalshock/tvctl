@@ -107,7 +107,11 @@ From scratch: scan, pair with the Allow prompt (8s), then `status`, `now`
 `input reliance` (matches the owner's label), `vol up/down`, `key back/home`,
 `toast`, `apps`, `open netflix` / `youtube` / `prime` (shortcut names resolve
 to LG's own app ids), `sleep`, and auto-wake from standby via `key home`
-(2.4s) and `open netflix` (2.5s). `tv wake` from standby: 1.8s.
+(2.4s) and `open netflix` (2.5s). `tv wake` from standby: 1.8s. On 8 Nov
+2026: `youtube <words>` and `play <youtube link>` play through the cast
+path (the app's own deep link only opened it; `now` then says "YouTube is
+playing."), and the screen saver no longer counts as standby. `pause`,
+`play` and `stop` verified against that video.
 
 Not yet re-verified on the Fire TV after today's changes: two-step PIN
 pairing, `play`, `seek next`, auto-wake. Those paths are unit-tested
